@@ -1,708 +1,1062 @@
 package com.gptvideo2anime
 
-import android.Manifest
-import android.app.Dialog
-import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Color
-import android.media.MediaMetadataRetriever
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.SystemClock
-import android.view.Gravity
-import android.view.ViewGroup
-import android.widget.Button
-import android.widget.FrameLayout
-import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
-import com.gptvideo2anime.inference.OnnxAnimeEngine
+import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.VideoFile
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import com.gptvideo2anime.model.ModelManager
 import com.gptvideo2anime.pipeline.VideoProcessor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
-class MainActivity : AppCompatActivity() {
+private val Background =
+    Color(0xFF07080D)
 
-    private lateinit var status: TextView
-    private lateinit var logs: TextView
-    private lateinit var scroll: ScrollView
-    private lateinit var originalPreview: ImageView
-    private lateinit var animePreview: ImageView
-    private lateinit var convertButton: Button
+private val Card =
+    Color(0xFF11131C)
 
-    private lateinit var modelManager: ModelManager
-    private lateinit var videoProcessor: VideoProcessor
+private val CardLight =
+    Color(0xFF181B27)
 
-    private var selectedVideo: Uri? = null
-    private var processing = false
+private val Accent =
+    Color(0xFF9D62FF)
 
-    private val videoPicker =
-        registerForActivityResult(
+private val AccentBlue =
+    Color(0xFF5F86FF)
+
+private val White =
+    Color(0xFFF8F7FF)
+
+private val Muted =
+    Color(0xFF9698A9)
+
+private val Green =
+    Color(0xFF65D88A)
+
+class MainActivity :
+    ComponentActivity() {
+
+    override fun onCreate(
+        savedInstanceState: Bundle?
+    ) {
+        super.onCreate(savedInstanceState)
+
+        setContent {
+            Video2AnimeApp()
+        }
+    }
+}
+
+@Composable
+private fun Video2AnimeApp() {
+    val context =
+        androidx.compose.ui.platform.LocalContext.current
+
+    val scope =
+        rememberCoroutineScope()
+
+    val modelManager =
+        remember {
+            ModelManager(context)
+        }
+
+    val videoProcessor =
+        remember {
+            VideoProcessor(context)
+        }
+
+    var selectedVideo by remember {
+        mutableStateOf<Uri?>(null)
+    }
+
+    var resultVideo by remember {
+        mutableStateOf<Uri?>(null)
+    }
+
+    var strength by remember {
+        mutableIntStateOf(40)
+    }
+
+    var progress by remember {
+        mutableFloatStateOf(0f)
+    }
+
+    var processing by remember {
+        mutableStateOf(false)
+    }
+
+    var modelReady by remember {
+        mutableStateOf(false)
+    }
+
+    var status by remember {
+        mutableStateOf(
+            "Choose a video to begin"
+        )
+    }
+
+    var error by remember {
+        mutableStateOf<String?>(null)
+    }
+
+    val picker =
+        rememberLauncherForActivityResult(
             ActivityResultContracts.GetContent()
         ) { uri ->
 
             if (uri == null) {
-                appendLog("No video selected.")
-                return@registerForActivityResult
+                return@rememberLauncherForActivityResult
             }
 
             selectedVideo = uri
-
-            status.text = "Video selected."
-            appendLog("Video selected.")
-
-            generatePreview(uri)
+            resultVideo = null
+            progress = 0f
+            error = null
+            status = "Video selected"
         }
 
-    private val permissionLauncher =
-        registerForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions()
+    LaunchedEffect(Unit) {
+        try {
+            modelManager.ensureModels()
+            modelReady = true
+            status =
+                if (selectedVideo == null) {
+                    "Choose a video to begin"
+                } else {
+                    "Ready to process"
+                }
+        } catch (exception: Exception) {
+            error =
+                exception.message
+                    ?: "Unable to install model."
+            status = "Model setup failed"
+        }
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = Background
+    ) {
+        Column(
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .padding(
+                        horizontal = 20.dp,
+                        vertical = 14.dp
+                    ),
+            verticalArrangement =
+                Arrangement.spacedBy(16.dp)
         ) {
-            appendLog("Permissions checked.")
-        }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+            AppHeader()
 
-        modelManager = ModelManager(this)
-        videoProcessor = VideoProcessor(this)
+            if (resultVideo != null) {
 
-        buildUi()
-        requestPermissions()
-        installModels()
-    }
-
-    private fun buildUi() {
-
-        val root =
-            LinearLayout(this).apply {
-
-                orientation =
-                    LinearLayout.VERTICAL
-
-                setPadding(
-                    24,
-                    24,
-                    24,
-                    24
-                )
-
-                layoutParams =
-                    ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-            }
-
-        val title =
-            TextView(this).apply {
-
-                text = "GPT Video2Anime"
-                textSize = 26f
-
-                setPadding(
-                    0,
-                    0,
-                    0,
-                    12
-                )
-            }
-
-        root.addView(title)
-
-        status =
-            TextView(this).apply {
-
-                text = "Preparing models..."
-                textSize = 16f
-
-                setPadding(
-                    0,
-                    0,
-                    0,
-                    8
-                )
-            }
-
-        root.addView(status)
-
-        val chooseButton =
-            Button(this).apply {
-
-                text = "CHOOSE VIDEO"
-
-                setOnClickListener {
-
-                    if (processing) {
-                        appendLog(
-                            "Processing is already running."
-                        )
-                        return@setOnClickListener
+                ResultScreen(
+                    uri = resultVideo!!,
+                    onReset = {
+                        resultVideo = null
+                        selectedVideo = null
+                        progress = 0f
+                        status =
+                            "Choose a video to begin"
                     }
-
-                    videoPicker.launch("video/*")
-                }
-            }
-
-        root.addView(chooseButton)
-
-        convertButton =
-            Button(this).apply {
-
-                text = "CONVERT TO ANIME"
-
-                isEnabled = false
-
-                setOnClickListener {
-
-                    if (processing) {
-                        return@setOnClickListener
-                    }
-
-                    val input =
-                        selectedVideo
-
-                    if (input == null) {
-
-                        appendLog(
-                            "Select a video first."
-                        )
-
-                        return@setOnClickListener
-                    }
-
-                    startStage1(input)
-                }
-            }
-
-        root.addView(convertButton)
-
-        val previewRow =
-            LinearLayout(this).apply {
-
-                orientation =
-                    LinearLayout.HORIZONTAL
-
-                layoutParams =
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        320
-                    )
-
-                setPadding(
-                    0,
-                    8,
-                    0,
-                    8
                 )
-            }
-
-        originalPreview =
-            createPreviewImage()
-
-        animePreview =
-            createPreviewImage()
-
-        val originalBox =
-            createPreviewBox(
-                "Original",
-                originalPreview
-            )
-
-        val animeBox =
-            createPreviewBox(
-                "Anime",
-                animePreview
-            )
-
-        previewRow.addView(originalBox)
-        previewRow.addView(animeBox)
-
-        root.addView(previewRow)
-
-        logs =
-            TextView(this).apply {
-
-                textSize = 13f
-
-                setPadding(
-                    4,
-                    8,
-                    4,
-                    8
-                )
-            }
-
-        scroll =
-            ScrollView(this).apply {
-
-                layoutParams =
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        0,
-                        1f
-                    )
-
-                addView(logs)
-            }
-
-        root.addView(scroll)
-
-        setContentView(root)
-    }
-
-    private fun createPreviewImage(): ImageView {
-
-        return ImageView(this).apply {
-
-            layoutParams =
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-
-            scaleType =
-                ImageView.ScaleType.FIT_CENTER
-
-            setBackgroundColor(
-                Color.DKGRAY
-            )
-        }
-    }
-
-    private fun createPreviewBox(
-        title: String,
-        image: ImageView
-    ): LinearLayout {
-
-        return LinearLayout(this).apply {
-
-            orientation =
-                LinearLayout.VERTICAL
-
-            layoutParams =
-                LinearLayout.LayoutParams(
-                    0,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    1f
-                )
-
-            if (title == "Anime") {
-                setPadding(
-                    8,
-                    0,
-                    0,
-                    0
-                )
-            }
-
-            addView(
-                TextView(context).apply {
-
-                    text = title
-
-                    gravity =
-                        Gravity.CENTER
-
-                    textSize = 14f
-
-                    layoutParams =
-                        LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            32
-                        )
-                }
-            )
-
-            addView(image)
-
-            image.setOnClickListener {
-
-                if (image.drawable != null) {
-                    showFullPreview(image)
-                }
-            }
-        }
-    }
-
-    private fun installModels() {
-
-        lifecycleScope.launch {
-
-            try {
-
-                modelManager.ensureModels { message ->
-
-                    appendLog(message)
-                }
-
-                status.text =
-                    "Models ready."
-
-                convertButton.isEnabled =
-                    selectedVideo != null
-
-            } catch (e: Exception) {
-
-                status.text =
-                    "Model install failed"
-
-                appendLog(
-                    "ERROR: ${e.message ?: "Unknown error"}"
-                )
-            }
-        }
-    }
-
-    private fun requestPermissions() {
-
-        val permission =
-            if (Build.VERSION.SDK_INT >= 33) {
-
-                Manifest.permission.READ_MEDIA_VIDEO
 
             } else {
 
-                Manifest.permission.READ_EXTERNAL_STORAGE
+                VideoPickerCard(
+                    selected = selectedVideo != null,
+                    onClick = {
+                        if (!processing) {
+                            picker.launch("video/*")
+                        }
+                    }
+                )
+
+                StrengthCard(
+                    strength = strength,
+                    enabled = !processing,
+                    onStrengthChanged = {
+                        strength = it
+                    }
+                )
+
+                AnimatedVisibility(
+                    visible = processing
+                ) {
+                    ProgressCard(
+                        progress = progress,
+                        status = status
+                    )
+                }
+
+                if (!processing) {
+                    Spacer(
+                        modifier =
+                            Modifier.weight(1f)
+                    )
+                }
+
+                if (
+                    !processing &&
+                    error != null
+                ) {
+                    ErrorCard(
+                        message = error!!
+                    )
+                }
+
+                if (!processing) {
+                    Spacer(
+                        modifier =
+                            Modifier.weight(0.2f)
+                    )
+                }
+
+                ProcessButton(
+                    enabled =
+                        selectedVideo != null &&
+                            modelReady &&
+                            !processing,
+                    processing = processing,
+                    onClick = {
+
+                        val input =
+                            selectedVideo
+                                ?: return@ProcessButton
+
+                        error = null
+                        processing = true
+                        progress = 0f
+                        status =
+                            "Preparing video..."
+
+                        scope.launch(
+                            Dispatchers.IO
+                        ) {
+                            try {
+
+                                val result =
+                                    videoProcessor
+                                        .processVideo(
+                                            uri = input,
+                                            strength = strength
+                                        ) { current,
+                                            total,
+                                            stage ->
+
+                                            val value =
+                                                if (total > 0) {
+                                                    (
+                                                        current
+                                                            .toFloat() /
+                                                            total
+                                                                .toFloat()
+                                                        )
+                                                            .coerceIn(
+                                                                0f,
+                                                                1f
+                                                            )
+                                                } else {
+                                                    0f
+                                                }
+
+                                            scope.launch(
+                                                Dispatchers.Main
+                                            ) {
+                                                progress =
+                                                    value
+                                                status =
+                                                    stage
+                                            }
+                                        }
+
+                                withContext(
+                                    Dispatchers.Main
+                                ) {
+                                    resultVideo =
+                                        Uri.fromFile(
+                                            result.outputFile
+                                        )
+
+                                    progress = 1f
+                                    status =
+                                        "Your anime video is ready"
+                                    processing = false
+                                }
+
+                            } catch (
+                                exception: Exception
+                            ) {
+
+                                withContext(
+                                    Dispatchers.Main
+                                ) {
+                                    processing = false
+                                    status =
+                                        "Processing failed"
+                                    error =
+                                        exception.message
+                                            ?: "Unknown processing error."
+                                }
+                            }
+                        }
+                    }
+                )
+
+                if (!processing) {
+                    Text(
+                        text =
+                            "Everything runs offline on your device",
+                        color = Muted,
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center,
+                        modifier =
+                            Modifier.fillMaxWidth()
+                    )
+                }
             }
+        }
+    }
+}
 
-        if (
-            ContextCompat.checkSelfPermission(
-                this,
-                permission
-            ) != PackageManager.PERMISSION_GRANTED
+@Composable
+private fun AppHeader() {
+    Row(
+        modifier =
+            Modifier.fillMaxWidth(),
+        verticalAlignment =
+            Alignment.CenterVertically
+    ) {
+
+        Box(
+            modifier =
+                Modifier
+                    .size(50.dp)
+                    .clip(
+                        RoundedCornerShape(16.dp)
+                    )
+                    .background(
+                        Brush.linearGradient(
+                            listOf(
+                                Accent,
+                                AccentBlue
+                            )
+                        )
+                    ),
+            contentAlignment =
+                Alignment.Center
         ) {
+            Icon(
+                imageVector =
+                    Icons.Default.AutoAwesome,
+                contentDescription = null,
+                tint = Color.White,
+                modifier =
+                    Modifier.size(27.dp)
+            )
+        }
 
-            permissionLauncher.launch(
-                arrayOf(permission)
+        Spacer(
+            modifier =
+                Modifier.width(13.dp)
+        )
+
+        Column {
+            Text(
+                text = "Video2Anime",
+                color = White,
+                fontSize = 23.sp,
+                fontWeight =
+                    FontWeight.Bold
+            )
+
+            Text(
+                text = "Hayao Studio",
+                color = Muted,
+                fontSize = 12.sp
+            )
+        }
+
+        Spacer(
+            modifier =
+                Modifier.weight(1f)
+        )
+
+        Box(
+            modifier =
+                Modifier
+                    .clip(CircleShape)
+                    .background(
+                        Color(0xFF102219)
+                    )
+                    .padding(
+                        horizontal = 10.dp,
+                        vertical = 6.dp
+                    )
+        ) {
+            Text(
+                text = "OFFLINE",
+                color = Green,
+                fontSize = 9.sp,
+                fontWeight =
+                    FontWeight.Bold
             )
         }
     }
+}
 
-    private fun generatePreview(
-        uri: Uri
+@Composable
+private fun VideoPickerCard(
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .clip(
+                    RoundedCornerShape(25.dp)
+                )
+                .background(Card)
+                .border(
+                    width = 1.dp,
+                    brush =
+                        Brush.linearGradient(
+                            listOf(
+                                Accent.copy(
+                                    alpha = 0.45f
+                                ),
+                                AccentBlue.copy(
+                                    alpha = 0.25f
+                                )
+                            )
+                        ),
+                    shape =
+                        RoundedCornerShape(25.dp)
+                )
+                .clickable(
+                    onClick = onClick
+                )
+                .padding(22.dp),
+        horizontalAlignment =
+            Alignment.CenterHorizontally
     ) {
 
-        lifecycleScope.launch {
-
-            try {
-
-                convertButton.isEnabled = false
-
-                appendLog(
-                    "Extracting first frame..."
-                )
-
-                val frame =
-                    withContext(Dispatchers.IO) {
-
-                        extractFirstFrame(uri)
-                    }
-
-                originalPreview.setImageBitmap(
-                    frame
-                )
-
-                originalPreview.invalidate()
-
-                appendLog(
-                    "Original preview displayed."
-                )
-
-                val modelPath =
-                    modelManager.animeModelPath()
-                        ?: throw IllegalStateException(
-                            "AnimeGANv3 missing."
-                        )
-
-                appendLog(
-                    "Running AnimeGANv3..."
-                )
-
-                val start =
-                    SystemClock.elapsedRealtime()
-
-                val anime =
-                    withContext(
-                        Dispatchers.Default
-                    ) {
-
-                        OnnxAnimeEngine(
-                            modelPath
-                        ).use { engine ->
-
-                            engine.processFrame(
-                                frame
+        Box(
+            modifier =
+                Modifier
+                    .size(68.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.linearGradient(
+                            listOf(
+                                Accent.copy(
+                                    alpha = 0.25f
+                                ),
+                                AccentBlue.copy(
+                                    alpha = 0.18f
+                                )
                             )
-                        }
-                    }
+                        )
+                    ),
+            contentAlignment =
+                Alignment.Center
+        ) {
+            Icon(
+                imageVector =
+                    Icons.Default.VideoFile,
+                contentDescription = null,
+                tint = White,
+                modifier =
+                    Modifier.size(34.dp)
+            )
+        }
 
-                animePreview.setImageBitmap(
-                    anime
+        Spacer(
+            modifier =
+                Modifier.height(14.dp)
+        )
+
+        Text(
+            text =
+                if (selected) {
+                    "VIDEO SELECTED"
+                } else {
+                    "CHOOSE VIDEO"
+                },
+            color = White,
+            fontSize = 17.sp,
+            fontWeight =
+                FontWeight.Bold
+        )
+
+        Spacer(
+            modifier =
+                Modifier.height(5.dp)
+        )
+
+        Text(
+            text =
+                if (selected) {
+                    "Tap to choose another video"
+                } else {
+                    "MP4, MOV, MKV and supported video formats"
+                },
+            color = Muted,
+            fontSize = 12.sp,
+            textAlign =
+                TextAlign.Center
+        )
+    }
+}
+
+@Composable
+private fun StrengthCard(
+    strength: Int,
+    enabled: Boolean,
+    onStrengthChanged: (Int) -> Unit
+) {
+    Column(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .clip(
+                    RoundedCornerShape(22.dp)
+                )
+                .background(Card)
+                .padding(18.dp)
+    ) {
+
+        Row(
+            modifier =
+                Modifier.fillMaxWidth(),
+            verticalAlignment =
+                Alignment.CenterVertically
+        ) {
+
+            Column {
+                Text(
+                    text = "HAYAO STRENGTH",
+                    color = White,
+                    fontSize = 14.sp,
+                    fontWeight =
+                        FontWeight.Bold
                 )
 
-                animePreview.invalidate()
-
-                val elapsed =
-                    SystemClock.elapsedRealtime() -
-                        start
-
-                status.text =
-                    "Preview ready (${elapsed} ms)"
-
-                appendLog(
-                    "Anime preview completed in ${elapsed} ms"
+                Spacer(
+                    modifier =
+                        Modifier.height(3.dp)
                 )
 
-                appendLog(
-                    "Anime preview displayed."
+                Text(
+                    text =
+                        "Controls the anime blend intensity",
+                    color = Muted,
+                    fontSize = 11.sp
                 )
+            }
 
-                convertButton.isEnabled =
-                    true
+            Spacer(
+                modifier =
+                    Modifier.weight(1f)
+            )
 
-            } catch (e: Exception) {
+            Text(
+                text = "$strength%",
+                color = Accent,
+                fontSize = 20.sp,
+                fontWeight =
+                    FontWeight.Bold
+            )
+        }
 
-                status.text =
-                    "Preview failed"
+        Spacer(
+            modifier =
+                Modifier.height(14.dp)
+        )
 
-                appendLog(
-                    "ERROR: ${e.message ?: "Unknown error"}"
+        Row(
+            modifier =
+                Modifier.fillMaxWidth(),
+            horizontalArrangement =
+                Arrangement.spacedBy(8.dp)
+        ) {
+
+            listOf(
+                30,
+                40,
+                50,
+                60
+            ).forEach { value ->
+
+                StrengthChip(
+                    value = value,
+                    selected =
+                        value == strength,
+                    enabled = enabled,
+                    onClick = {
+                        onStrengthChanged(
+                            value
+                        )
+                    },
+                    modifier =
+                        Modifier.weight(1f)
                 )
-
-                convertButton.isEnabled =
-                    selectedVideo != null
             }
         }
     }
+}
 
-    private fun startStage1(
-        input: Uri
+@Composable
+private fun StrengthChip(
+    value: Int,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier
+) {
+    Box(
+        modifier =
+            modifier
+                .height(44.dp)
+                .clip(
+                    RoundedCornerShape(13.dp)
+                )
+                .background(
+                    if (selected) {
+                        Accent
+                    } else {
+                        CardLight
+                    }
+                )
+                .border(
+                    width = 1.dp,
+                    color =
+                        if (selected) {
+                            Accent
+                        } else {
+                            Color.Transparent
+                        },
+                    shape =
+                        RoundedCornerShape(13.dp)
+                )
+                .clickable(
+                    enabled = enabled,
+                    onClick = onClick
+                ),
+        contentAlignment =
+            Alignment.Center
+    ) {
+        Text(
+            text = "$value%",
+            color =
+                if (selected) {
+                    Color.White
+                } else {
+                    Muted
+                },
+            fontSize = 13.sp,
+            fontWeight =
+                if (selected) {
+                    FontWeight.Bold
+                } else {
+                    FontWeight.Medium
+                }
+        )
+    }
+}
+
+@Composable
+private fun ProgressCard(
+    progress: Float,
+    status: String
+) {
+    Column(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .clip(
+                    RoundedCornerShape(22.dp)
+                )
+                .background(Card)
+                .padding(18.dp)
+    ) {
+
+        Row(
+            modifier =
+                Modifier.fillMaxWidth(),
+            verticalAlignment =
+                Alignment.CenterVertically
+        ) {
+
+            Column(
+                modifier =
+                    Modifier.weight(1f)
+            ) {
+                Text(
+                    text = "PROCESSING",
+                    color = White,
+                    fontSize = 14.sp,
+                    fontWeight =
+                        FontWeight.Bold
+                )
+
+                Spacer(
+                    modifier =
+                        Modifier.height(4.dp)
+                )
+
+                Text(
+                    text = status,
+                    color = Muted,
+                    fontSize = 11.sp,
+                    maxLines = 2
+                )
+            }
+
+            Text(
+                text =
+                    "${(progress * 100).toInt()}%",
+                color = Accent,
+                fontSize = 21.sp,
+                fontWeight =
+                    FontWeight.Bold
+            )
+        }
+
+        Spacer(
+            modifier =
+                Modifier.height(13.dp)
+        )
+
+        LinearProgressIndicator(
+            progress = {
+                progress
+            },
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .height(7.dp)
+                    .clip(CircleShape),
+            color = Accent,
+            trackColor = CardLight
+        )
+    }
+}
+
+@Composable
+private fun ProcessButton(
+    enabled: Boolean,
+    processing: Boolean,
+    onClick: () -> Unit
+) {
+    Button(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .height(59.dp),
+        enabled = enabled,
+        shape =
+            RoundedCornerShape(18.dp),
+        colors =
+            ButtonDefaults.buttonColors(
+                containerColor = Accent,
+                disabledContainerColor =
+                    CardLight
+            ),
+        onClick = onClick
     ) {
 
         if (processing) {
-            return
-        }
 
-        processing = true
-        convertButton.isEnabled = false
-
-        lifecycleScope.launch {
-
-            try {
-
-                appendLog(
-                    "Starting Stage 1..."
-                )
-
-                val result =
-                    withContext(Dispatchers.IO) {
-
-                        videoProcessor.process(
-                            input
-                        ) { current, total, stage ->
-
-                            runOnUiThread {
-
-                                status.text =
-                                    "$stage ($current/$total)"
-
-                                appendLog(
-                                    "$stage ($current/$total)"
-                                )
-                            }
-                        }
-                    }
-
-                val previewPath =
-                    result.testFramePath
-
-                if (
-                    !previewPath.isNullOrBlank()
-                ) {
-
-                    val file =
-                        File(previewPath)
-
-                    if (file.exists()) {
-
-                        appendLog(
-                            "Preview file found."
-                        )
-
-                        val bitmap =
-                            withContext(
-                                Dispatchers.IO
-                            ) {
-
-                                BitmapFactory.decodeFile(
-                                    file.absolutePath
-                                )
-                            }
-
-                        if (bitmap != null) {
-
-                            animePreview.setImageBitmap(
-                                bitmap
-                            )
-
-                            animePreview.invalidate()
-
-                            appendLog(
-                                "Generated anime preview displayed."
-                            )
-
-                        } else {
-
-                            appendLog(
-                                "ERROR: Unable to decode generated preview."
-                            )
-                        }
-
-                    } else {
-
-                        appendLog(
-                            "ERROR: Preview file does not exist."
-                        )
-                    }
-
-                } else {
-
-                    appendLog(
-                        "ERROR: VideoProcessor returned no preview path."
-                    )
-                }
-
-                status.text =
-                    "Stage 1 Complete"
-
-            } catch (e: Exception) {
-
-                status.text =
-                    "Processing failed"
-
-                appendLog(
-                    "ERROR: ${e.message ?: "Unknown error"}"
-                )
-
-            } finally {
-
-                processing = false
-
-                convertButton.isEnabled =
-                    selectedVideo != null
-            }
-        }
-    }
-
-    private fun extractFirstFrame(
-        uri: Uri
-    ): Bitmap {
-
-        val retriever =
-            MediaMetadataRetriever()
-
-        try {
-
-            retriever.setDataSource(
-                this,
-                uri
+            CircularProgressIndicator(
+                modifier =
+                    Modifier.size(21.dp),
+                color = Color.White,
+                strokeWidth = 2.dp
             )
 
-            return retriever.getFrameAtTime(
-                0L,
-                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-            ) ?: throw IllegalStateException(
-                "Unable to decode first video frame."
+            Spacer(
+                modifier =
+                    Modifier.width(10.dp)
             )
 
-        } finally {
+            Text(
+                text = "PROCESSING..."
+            )
 
-            retriever.release()
+        } else {
+
+            Icon(
+                imageVector =
+                    Icons.Default.AutoAwesome,
+                contentDescription = null
+            )
+
+            Spacer(
+                modifier =
+                    Modifier.width(9.dp)
+            )
+
+            Text(
+                text = "PROCESS VIDEO",
+                fontWeight =
+                    FontWeight.Bold
+            )
         }
     }
+}
 
-    private fun showFullPreview(
-        source: ImageView
+@Composable
+private fun ErrorCard(
+    message: String
+) {
+    Box(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .clip(
+                    RoundedCornerShape(15.dp)
+                )
+                .background(
+                    Color(0xFF29151A)
+                )
+                .padding(14.dp)
     ) {
-
-        val dialog =
-            Dialog(
-                this,
-                android.R.style.Theme_Black_NoTitleBar_Fullscreen
-            )
-
-        val container =
-            FrameLayout(this).apply {
-
-                setBackgroundColor(
-                    Color.BLACK
-                )
-            }
-
-        val image =
-            ImageView(this).apply {
-
-                setImageDrawable(
-                    source.drawable
-                )
-
-                scaleType =
-                    ImageView.ScaleType.FIT_CENTER
-
-                layoutParams =
-                    FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT
-                    )
-            }
-
-        container.addView(image)
-
-        container.setOnClickListener {
-            dialog.dismiss()
-        }
-
-        dialog.setContentView(
-            container
+        Text(
+            text = message,
+            color =
+                Color(0xFFFF9B9B),
+            fontSize = 11.sp
         )
-
-        dialog.show()
     }
+}
 
-    private fun appendLog(
-        text: String
-    ) {
+@Composable
+private fun ResultScreen(
+    uri: Uri,
+    onReset: () -> Unit
+) {
+    val context =
+        androidx.compose.ui.platform.LocalContext.current
 
-        if (!::logs.isInitialized) {
-            return
+    val player =
+        remember(uri) {
+            ExoPlayer.Builder(
+                context
+            ).build().apply {
+                setMediaItem(
+                    MediaItem.fromUri(uri)
+                )
+                prepare()
+                playWhenReady = false
+            }
         }
 
-        runOnUiThread {
+    androidx.compose.runtime.DisposableEffect(
+        player
+    ) {
+        onDispose {
+            player.release()
+        }
+    }
 
-            logs.append(
-                "$text\n"
+    Column(
+        modifier =
+            Modifier.fillMaxSize(),
+        verticalArrangement =
+            Arrangement.spacedBy(14.dp)
+    ) {
+
+        Row(
+            modifier =
+                Modifier.fillMaxWidth(),
+            verticalAlignment =
+                Alignment.CenterVertically
+        ) {
+
+            Icon(
+                imageVector =
+                    Icons.Default.CheckCircle,
+                contentDescription = null,
+                tint = Green,
+                modifier =
+                    Modifier.size(28.dp)
             )
 
-            if (::scroll.isInitialized) {
+            Spacer(
+                modifier =
+                    Modifier.width(9.dp)
+            )
 
-                scroll.post {
+            Column {
+                Text(
+                    text = "Anime video ready",
+                    color = White,
+                    fontSize = 19.sp,
+                    fontWeight =
+                        FontWeight.Bold
+                )
 
-                    scroll.fullScroll(
-                        ScrollView.FOCUS_DOWN
-                    )
-                }
+                Text(
+                    text =
+                        "Your final result is below",
+                    color = Muted,
+                    fontSize = 11.sp
+                )
             }
+        }
+
+        Box(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .clip(
+                        RoundedCornerShape(23.dp)
+                    )
+                    .background(Color.Black)
+        ) {
+
+            AndroidView(
+                modifier =
+                    Modifier.fillMaxSize(),
+                factory = { viewContext ->
+
+                    PlayerView(
+                        viewContext
+                    ).apply {
+                        this.player = player
+                        useController = true
+                    }
+                },
+                update = { view ->
+                    view.player = player
+                }
+            )
+
+            Box(
+                modifier =
+                    Modifier
+                        .align(
+                            Alignment.TopEnd
+                        )
+                        .padding(12.dp)
+                        .clip(CircleShape)
+                        .background(
+                            Color.Black.copy(
+                                alpha = 0.55f
+                            )
+                        )
+                        .padding(
+                            horizontal = 10.dp,
+                            vertical = 6.dp
+                        )
+            ) {
+                Text(
+                    text = "HAYAO",
+                    color = White,
+                    fontSize = 9.sp,
+                    fontWeight =
+                        FontWeight.Bold
+                )
+            }
+        }
+
+        Button(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .height(55.dp),
+            onClick = onReset,
+            shape =
+                RoundedCornerShape(17.dp),
+            colors =
+                ButtonDefaults.buttonColors(
+                    containerColor =
+                        CardLight
+                )
+        ) {
+
+            Icon(
+                imageVector =
+                    Icons.Default.Movie,
+                contentDescription = null
+            )
+
+            Spacer(
+                modifier =
+                    Modifier.width(8.dp)
+            )
+
+            Text(
+                text = "PROCESS ANOTHER VIDEO",
+                fontWeight =
+                    FontWeight.Bold
+            )
         }
     }
 }
