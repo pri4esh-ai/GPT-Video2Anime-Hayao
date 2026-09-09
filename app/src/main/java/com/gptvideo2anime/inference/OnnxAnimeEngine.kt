@@ -1,322 +1,436 @@
-// FILE: app/src/main/java/com/gptvideo2anime/inference/OnnxAnimeEngine.kt
-
 package com.gptvideo2anime.inference
 
-import android.graphics.Bitmap
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
+import ai.onnxruntime.TensorInfo
+import android.graphics.Bitmap
+import android.util.Log
 import java.nio.FloatBuffer
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.roundToInt
 
 class OnnxAnimeEngine(
-    private val modelPath: String
+    modelPath: String
 ) : AutoCloseable {
 
     private val environment =
         OrtEnvironment.getEnvironment()
 
-    private val session: OrtSession
+    private val session =
+        environment.createSession(modelPath)
 
-    private val inputName: String
+    fun inputNames(): Set<String> =
+        session.inputNames
 
-    private val inputWidth = 256
-    private val inputHeight = 256
+    fun outputNames(): Set<String> =
+        session.outputNames
 
-    init {
-        val options =
-            OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(
-                    max(
-                        1,
-                        Runtime.getRuntime().availableProcessors() / 2
-                    )
-                )
+    fun processFrame(
+        frame: Bitmap
+    ): Bitmap {
+        require(!frame.isRecycled) {
+            "Input frame is recycled."
+        }
 
-                setInterOpNumThreads(1)
-            }
-
-        session =
-            environment.createSession(
-                modelPath,
-                options
-            )
-
-        inputName =
+        val inputName =
             session.inputNames.firstOrNull()
                 ?: throw IllegalStateException(
-                    "AnimeGAN model has no input tensor."
+                    "ONNX model has no input."
                 )
-    }
 
-    fun infer(
-        bitmap: Bitmap
-    ): Bitmap {
-        val source =
-            if (
-                bitmap.width != inputWidth ||
-                bitmap.height != inputHeight
-            ) {
-                Bitmap.createScaledBitmap(
-                    bitmap,
-                    inputWidth,
-                    inputHeight,
-                    true
+        val tensorInfo =
+            (session.inputInfo[inputName]?.info as? TensorInfo)
+                ?: throw IllegalStateException(
+                    "Unable to inspect ONNX input."
                 )
-            } else {
-                bitmap
-            }
 
-        val inputData =
-            createInputTensorData(
-                source
+        val inputShape =
+            tensorInfo.shape
+
+        require(inputShape.size == 4) {
+            "Unsupported ONNX input rank: ${inputShape.size}"
+        }
+
+        val isNchw =
+            inputShape[1] == 3L
+
+        val modelHeight =
+            resolveDimension(
+                if (isNchw) inputShape[2] else inputShape[1],
+                512
             )
 
-        val inputTensor =
-            OnnxTensor.createTensor(
-                environment,
-                FloatBuffer.wrap(inputData),
-                longArrayOf(
-                    1,
-                    3,
-                    inputHeight.toLong(),
-                    inputWidth.toLong()
-                )
+        val modelWidth =
+            resolveDimension(
+                if (isNchw) inputShape[3] else inputShape[2],
+                512
+            )
+
+        val resized =
+            Bitmap.createScaledBitmap(
+                frame,
+                modelWidth,
+                modelHeight,
+                true
             )
 
         try {
-            val inputs =
-                mapOf(
-                    inputName to inputTensor
-                )
+            val tensorData =
+                if (isNchw) {
+                    bitmapToNchwFloatArray(resized)
+                } else {
+                    bitmapToNhwcFloatArray(resized)
+                }
 
-            val results =
-                session.run(inputs)
-
-            try {
-                if (results.size == 0) {
-                    throw IllegalStateException(
-                        "AnimeGAN returned no output."
+            val shape =
+                if (isNchw) {
+                    longArrayOf(
+                        1L,
+                        3L,
+                        modelHeight.toLong(),
+                        modelWidth.toLong()
+                    )
+                } else {
+                    longArrayOf(
+                        1L,
+                        modelHeight.toLong(),
+                        modelWidth.toLong(),
+                        3L
                     )
                 }
 
-                val output =
-                    results[0].value
+            Log.i(
+                "OnnxAnimeEngine",
+                "Input tensor=${shape.contentToString()} layout=${if (isNchw) "NCHW" else "NHWC"}"
+            )
 
-                return outputToBitmap(
-                    output = output,
-                    width = inputWidth,
-                    height = inputHeight
-                )
-            } finally {
-                results.close()
+            OnnxTensor.createTensor(
+                environment,
+                FloatBuffer.wrap(tensorData),
+                shape
+            ).use { inputTensor ->
+
+                session.run(
+                    mapOf(
+                        inputName to inputTensor
+                    )
+                ).use { result ->
+
+                    require(result.size() > 0) {
+                        "ONNX model returned no output."
+                    }
+
+                    return outputToBitmap(
+                        result[0].value,
+                        frame.width,
+                        frame.height,
+                        modelWidth,
+                        modelHeight
+                    )
+                }
             }
         } finally {
-            inputTensor.close()
-
-            if (source !== bitmap) {
-                source.recycle()
+            if (!resized.isRecycled) {
+                resized.recycle()
             }
         }
     }
 
-    private fun createInputTensorData(
+    fun infer(
+        frame: Bitmap
+    ): Bitmap {
+        return processFrame(frame)
+    }
+
+    private fun bitmapToNchwFloatArray(
         bitmap: Bitmap
     ): FloatArray {
-        val pixels =
-            IntArray(
-                inputWidth * inputHeight
-            )
+        val width = bitmap.width
+        val height = bitmap.height
+        val pixelCount = width * height
+
+        val pixels = IntArray(pixelCount)
 
         bitmap.getPixels(
             pixels,
             0,
-            inputWidth,
+            width,
             0,
             0,
-            inputWidth,
-            inputHeight
+            width,
+            height
         )
 
-        val planeSize =
-            inputWidth * inputHeight
+        val data =
+            FloatArray(pixelCount * 3)
+
+        for (i in 0 until pixelCount) {
+            val pixel = pixels[i]
+
+            val r =
+                ((pixel shr 16) and 0xFF) / 255f
+
+            val g =
+                ((pixel shr 8) and 0xFF) / 255f
+
+            val b =
+                (pixel and 0xFF) / 255f
+
+            data[i] =
+                r * 2f - 1f
+
+            data[pixelCount + i] =
+                g * 2f - 1f
+
+            data[pixelCount * 2 + i] =
+                b * 2f - 1f
+        }
+
+        return data
+    }
+
+    private fun bitmapToNhwcFloatArray(
+        bitmap: Bitmap
+    ): FloatArray {
+        val width = bitmap.width
+        val height = bitmap.height
+
+        val pixels =
+            IntArray(width * height)
+
+        bitmap.getPixels(
+            pixels,
+            0,
+            width,
+            0,
+            0,
+            width,
+            height
+        )
 
         val data =
-            FloatArray(
-                planeSize * 3
-            )
+            FloatArray(width * height * 3)
 
-        for (index in pixels.indices) {
-            val pixel =
-                pixels[index]
+        var index = 0
 
-            val red =
-                (pixel shr 16) and 0xff
+        for (pixel in pixels) {
+            data[index++] =
+                (((pixel shr 16) and 0xFF) / 255f) * 2f - 1f
 
-            val green =
-                (pixel shr 8) and 0xff
+            data[index++] =
+                (((pixel shr 8) and 0xFF) / 255f) * 2f - 1f
 
-            val blue =
-                pixel and 0xff
-
-            data[index] =
-                red / 127.5f - 1.0f
-
-            data[
-                planeSize + index
-            ] =
-                green / 127.5f - 1.0f
-
-            data[
-                planeSize * 2 + index
-            ] =
-                blue / 127.5f - 1.0f
+            data[index++] =
+                ((pixel and 0xFF) / 255f) * 2f - 1f
         }
 
         return data
     }
 
     private fun outputToBitmap(
-        output: Any?,
-        width: Int,
-        height: Int
+        output: Any,
+        outputWidth: Int,
+        outputHeight: Int,
+        modelWidth: Int,
+        modelHeight: Int
     ): Bitmap {
-        val values =
-            flattenOutput(output)
+        val data =
+            extractFloatArray(output)
 
-        val expected =
-            width * height * 3
+        val pixelCount =
+            modelWidth * modelHeight
 
-        if (values.size < expected) {
-            throw IllegalStateException(
-                "AnimeGAN output is too small: " +
-                    "${values.size} values, expected $expected."
-            )
+        require(data.size >= pixelCount * 3) {
+            "ONNX output contains insufficient pixel data: ${data.size}"
         }
 
         val pixels =
-            IntArray(
-                width * height
+            IntArray(pixelCount)
+
+        val isNchwOutput =
+            data.size == pixelCount * 3 &&
+                looksLikeNchwOutput(data, pixelCount)
+
+        if (isNchwOutput) {
+            for (i in 0 until pixelCount) {
+                val r =
+                    outputValueToByte(data[i])
+
+                val g =
+                    outputValueToByte(
+                        data[pixelCount + i]
+                    )
+
+                val b =
+                    outputValueToByte(
+                        data[pixelCount * 2 + i]
+                    )
+
+                pixels[i] =
+                    (255 shl 24) or
+                        (r shl 16) or
+                        (g shl 8) or
+                        b
+            }
+        } else {
+            for (i in 0 until pixelCount) {
+                val base =
+                    i * 3
+
+                val r =
+                    outputValueToByte(data[base])
+
+                val g =
+                    outputValueToByte(data[base + 1])
+
+                val b =
+                    outputValueToByte(data[base + 2])
+
+                pixels[i] =
+                    (255 shl 24) or
+                        (r shl 16) or
+                        (g shl 8) or
+                        b
+            }
+        }
+
+        val modelBitmap =
+            Bitmap.createBitmap(
+                modelWidth,
+                modelHeight,
+                Bitmap.Config.ARGB_8888
             )
 
-        val planeSize =
-            width * height
+        modelBitmap.setPixels(
+            pixels,
+            0,
+            modelWidth,
+            0,
+            0,
+            modelWidth,
+            modelHeight
+        )
 
-        for (index in pixels.indices) {
-            val red =
-                toByte(
-                    values[index]
-                )
-
-            val green =
-                toByte(
-                    values[
-                        planeSize + index
-                    ]
-                )
-
-            val blue =
-                toByte(
-                    values[
-                        planeSize * 2 + index
-                    ]
-                )
-
-            pixels[index] =
-                (0xff shl 24) or
-                    (red shl 16) or
-                    (green shl 8) or
-                    blue
+        if (
+            modelWidth == outputWidth &&
+                modelHeight == outputHeight
+        ) {
+            return modelBitmap
         }
 
-        return Bitmap.createBitmap(
-            pixels,
-            width,
-            height,
-            Bitmap.Config.ARGB_8888
-        )
+        val scaled =
+            Bitmap.createScaledBitmap(
+                modelBitmap,
+                outputWidth,
+                outputHeight,
+                true
+            )
+
+        modelBitmap.recycle()
+
+        return scaled
     }
 
-    private fun flattenOutput(
-        value: Any?
+    private fun looksLikeNchwOutput(
+        data: FloatArray,
+        pixelCount: Int
+    ): Boolean {
+        if (data.size != pixelCount * 3) {
+            return false
+        }
+
+        val sampleCount =
+            minOf(pixelCount, 32)
+
+        var channelRangeScore = 0
+
+        for (i in 0 until sampleCount) {
+            val r =
+                data[i]
+
+            val g =
+                data[pixelCount + i]
+
+            val b =
+                data[pixelCount * 2 + i]
+
+            if (
+                r in -1.01f..1.01f &&
+                g in -1.01f..1.01f &&
+                b in -1.01f..1.01f
+            ) {
+                channelRangeScore++
+            }
+        }
+
+        return channelRangeScore >= sampleCount / 2
+    }
+
+    private fun extractFloatArray(
+        value: Any
     ): FloatArray {
         return when (value) {
-            is FloatArray -> {
+            is FloatArray ->
                 value
-            }
 
             is Array<*> -> {
-                val output =
+                val list =
                     ArrayList<Float>()
 
-                flattenArray(
-                    value,
-                    output
-                )
+                fun visit(value: Any?) {
+                    when (value) {
+                        is FloatArray ->
+                            value.forEach(list::add)
 
-                output.toFloatArray()
+                        is Array<*> ->
+                            value.forEach(::visit)
+
+                        is Number ->
+                            list.add(value.toFloat())
+
+                        null -> Unit
+
+                        else ->
+                            throw IllegalStateException(
+                                "Unsupported output element: ${value::class.java.name}"
+                            )
+                    }
+                }
+
+                visit(value)
+
+                list.toFloatArray()
             }
 
-            else -> {
+            else ->
                 throw IllegalStateException(
-                    "Unsupported AnimeGAN output type: " +
-                        "${value?.javaClass?.name}"
+                    "Unsupported output type: ${value::class.java.name}"
                 )
-            }
         }
     }
 
-    private fun flattenArray(
-        value: Any?,
-        output: MutableList<Float>
-    ) {
-        when (value) {
-            is FloatArray -> {
-                for (item in value) {
-                    output.add(item)
-                }
-            }
-
-            is Array<*> -> {
-                for (item in value) {
-                    flattenArray(
-                        item,
-                        output
-                    )
-                }
-            }
-
-            else -> {
-                throw IllegalStateException(
-                    "Unsupported nested AnimeGAN output type: " +
-                        "${value?.javaClass?.name}"
-                )
-            }
+    private fun resolveDimension(
+        dimension: Long,
+        fallback: Int
+    ): Int {
+        return if (dimension > 0L) {
+            dimension.toInt()
+        } else {
+            fallback
         }
     }
 
-    private fun toByte(
+    private fun outputValueToByte(
         value: Float
     ): Int {
         val normalized =
-            if (
-                value >= -1.1f &&
-                value <= 1.1f
-            ) {
-                (value + 1f) * 127.5f
+            if (value in -1f..1f) {
+                (value + 1f) * 0.5f
             } else {
-                value
+                value / 255f
             }
 
-        return min(
-            255,
-            max(
-                0,
-                normalized.roundToInt()
-            )
-        )
+        return (
+            normalized.coerceIn(0f, 1f) * 255f
+        ).toInt()
     }
 
     override fun close() {
