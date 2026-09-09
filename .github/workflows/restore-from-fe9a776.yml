@@ -17,7 +17,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Restore exact known-good commit
+      - name: Clone exact known-good commit
         shell: bash
         run: |
           set -e
@@ -34,7 +34,7 @@ jobs:
 
           echo "Known-good commit verified."
 
-      - name: Copy project without source Git metadata
+      - name: Copy project files
         shell: bash
         run: |
           set -e
@@ -47,12 +47,15 @@ jobs:
 
           tar \
             --exclude='.git' \
+            --exclude='.github/workflows' \
             -cf - . \
             | tar -xf - -C "$GITHUB_WORKSPACE"
 
           cd "$GITHUB_WORKSPACE"
 
-      - name: Verify restored project
+          echo "Project copied without Git metadata or workflow files."
+
+      - name: Verify Android project
         shell: bash
         run: |
           set -e
@@ -63,6 +66,8 @@ jobs:
           test -f app/build.gradle.kts
           test -f app/src/main/AndroidManifest.xml
           test -f gradlew
+          test -d app
+          test -d gradle
           test -d .git
 
           echo "Android project verification PASSED."
@@ -103,7 +108,7 @@ jobs:
         run: |
           set -e
 
-          echo "Final commit:"
+          echo "Final destination commit:"
           git rev-parse HEAD
 
           test -d app
@@ -112,4 +117,4 @@ jobs:
           test -f build.gradle.kts
           test -f gradlew
 
-          echo "GPT-Video2Anime restored successfully."
+          echo "GPT-Video2Anime project restored successfully."
