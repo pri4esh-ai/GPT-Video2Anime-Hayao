@@ -1,4 +1,4 @@
-name: Restore Known Good Project
+name: Restore Known Good GPT-Video2Anime
 
 on:
   workflow_dispatch:
@@ -17,50 +17,99 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Import exact fe9a776 snapshot
+      - name: Restore exact known-good commit
+        shell: bash
         run: |
           set -e
 
-          TARGET="fe9a776191a7463af1980c04726ad0ac71e64841"
           SOURCE_REPO="https://github.com/pri4esh-ai/GPT-Video2Anime.git"
+          SOURCE_COMMIT="fe9a776191a7463af1980c04726ad0ac71e64841"
 
-          echo "Downloading source repository..."
-          git clone "$SOURCE_REPO" source
+          git clone "$SOURCE_REPO" /tmp/GPT-Video2Anime
 
-          cd source
+          cd /tmp/GPT-Video2Anime
+          git checkout "$SOURCE_COMMIT"
 
-          echo "Checking target commit..."
-          git cat-file -t "$TARGET"
-          git show --no-patch --oneline "$TARGET"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 
-          echo "Switching to exact target..."
-          git checkout "$TARGET"
+          echo "Known-good commit verified."
 
-          cd ..
-
-          echo "Replacing destination working tree..."
+      - name: Copy project without source Git metadata
+        shell: bash
+        run: |
+          set -e
 
           find . -mindepth 1 -maxdepth 1 \
-            ! -name .git \
-            ! -name source \
+            ! -name '.git' \
             -exec rm -rf {} +
 
-          cp -a source/. .
+          cd /tmp/GPT-Video2Anime
 
-          rm -rf source
+          tar \
+            --exclude='.git' \
+            -cf - . \
+            | tar -xf - -C "$GITHUB_WORKSPACE"
 
-          echo "Adding exact fe9a776 project..."
-          git add -A
+          cd "$GITHUB_WORKSPACE"
+
+      - name: Verify restored project
+        shell: bash
+        run: |
+          set -e
+
+          test -f settings.gradle.kts
+          test -f build.gradle.kts
+          test -f gradle.properties
+          test -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
+          test -f gradlew
+          test -d .git
+
+          echo "Android project verification PASSED."
+          echo "Destination .git preserved."
+
+      - name: Commit restored project
+        shell: bash
+        run: |
+          set -e
 
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git commit -m "Restore project from known-good fe9a776" || true
+          git add -A
 
-          echo "Pushing restored project..."
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit \
+            -m "Restore known-good GPT-Video2Anime commit fe9a776"
+
+      - name: Push restored project
+        shell: bash
+        run: |
+          set -e
 
           git push origin HEAD:main
 
           echo "========================================"
-          echo "RESTORE COMPLETE"
+          echo "RESTORE SUCCESSFUL"
           echo "========================================"
+
+      - name: Final verification
+        shell: bash
+        run: |
+          set -e
+
+          echo "Final commit:"
+          git rev-parse HEAD
+
+          test -d app
+          test -d gradle
+          test -f settings.gradle.kts
+          test -f build.gradle.kts
+          test -f gradlew
+
+          echo "GPT-Video2Anime restored successfully."
