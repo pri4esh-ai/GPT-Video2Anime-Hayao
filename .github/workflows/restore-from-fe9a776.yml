@@ -11,23 +11,21 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout new repository
+      - name: Checkout destination repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Import exact fe9a776 snapshot
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
 
           TARGET="fe9a776191a7463af1980c04726ad0ac71e64841"
-          SOURCE_REPO="pri4esh-ai/GPT-Video2Anime"
-          SOURCE_REF="https://github.com/${SOURCE_REPO}.git"
+          SOURCE_REPO="https://github.com/pri4esh-ai/GPT-Video2Anime.git"
 
           echo "Downloading source repository..."
-          git clone "$SOURCE_REF" source
+          git clone "$SOURCE_REPO" source
 
           cd source
 
@@ -35,7 +33,7 @@ jobs:
           git cat-file -t "$TARGET"
           git show --no-patch --oneline "$TARGET"
 
-          echo "Creating temporary branch..."
+          echo "Switching to exact target..."
           git checkout "$TARGET"
 
           cd ..
@@ -59,10 +57,10 @@ jobs:
 
           git commit -m "Restore project from known-good fe9a776" || true
 
+          echo "Pushing restored project..."
+
           git push origin HEAD:main
 
           echo "========================================"
           echo "RESTORE COMPLETE"
           echo "========================================"
-          echo "Source: $SOURCE_REPO"
-          echo "Commit: $TARGET"
