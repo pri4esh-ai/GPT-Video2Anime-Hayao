@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
 
@@ -38,7 +38,6 @@ jobs:
         shell: bash
         run: |
           set -e
-
           yes | sdkmanager --licenses >/dev/null || true
 
           sdkmanager \
@@ -48,8 +47,6 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
 
       - name: Prepare bundled ONNX models
         shell: bash
@@ -59,14 +56,18 @@ jobs:
           MODEL_DIR="app/src/main/assets/models"
           mkdir -p "$MODEL_DIR"
 
-          download_and_verify () {
+          download_if_missing () {
             NAME="$1"
             URL="$2"
             SHA="$3"
 
             TARGET="$MODEL_DIR/$NAME"
 
-            echo
+            if [ -f "$TARGET" ]; then
+              echo "$NAME already exists."
+              return
+            fi
+
             echo "Downloading $NAME..."
 
             curl \
@@ -77,36 +78,27 @@ jobs:
               --output "$TARGET" \
               "$URL"
 
-            echo "Verifying SHA-256..."
-
             ACTUAL="$(sha256sum "$TARGET" | awk '{print $1}')"
 
             if [ "$ACTUAL" != "$SHA" ]; then
-              echo "ERROR: SHA mismatch for $NAME"
-              echo "Expected: $SHA"
-              echo "Actual:   $ACTUAL"
+              echo "SHA mismatch for $NAME"
               exit 1
             fi
 
-            echo "✓ $NAME verified"
-            ls -lh "$TARGET"
+            echo "$NAME verified."
           }
 
-          download_and_verify \
+          download_if_missing \
             "AnimeGANv3_Hayao_36.onnx" \
             "https://github.com/TachibanaYoshino/AnimeGANv3/releases/download/v1.1.0/AnimeGANv3_Hayao_36.onnx" \
             "95ba7b219073fd5b12f569bc38056ffd3019cf4caf15b1feb9f73d1286c9f69d"
 
-          download_and_verify \
+          download_if_missing \
             "RealESR-AnimeVideo-v3_x4.onnx" \
             "https://huggingface.co/tidus2102/Real-ESRGAN/resolve/main/RealESR-AnimeVideo-v3_x4.onnx" \
             "00ece3ac21c43ee31459216b5174b2cea0c5325044c5142aeb840f4890e175ff"
 
-          echo
-          echo "Bundled models:"
-          ls -lh "$MODEL_DIR"
-
-      - name: Verify existing Android project
+      - name: Verify project
         shell: bash
         run: |
           set -e
@@ -116,71 +108,45 @@ jobs:
           test -f gradle.properties
           test -f app/build.gradle.kts
           test -f app/src/main/AndroidManifest.xml
-
           test -f app/src/main/java/com/gptvideo2anime/MainActivity.kt
           test -f app/src/main/java/com/gptvideo2anime/pipeline/MediaCodecVideoEngine.kt
           test -f app/src/main/java/com/gptvideo2anime/pipeline/VideoProcessor.kt
           test -f app/src/main/java/com/gptvideo2anime/pipeline/VideoProcessingService.kt
           test -f app/src/main/java/com/gptvideo2anime/inference/OnnxAnimeEngine.kt
 
-          test -f app/src/main/assets/models/AnimeGANv3_Hayao_36.onnx
-          test -f app/src/main/assets/models/RealESR-AnimeVideo-v3_x4.onnx
-
-          echo "Android project validation passed."
-
       - name: Verify Gradle wrapper
         shell: bash
         run: |
-          set -e
-
-          test -f gradlew
-          chmod +x ./gradlew
+          chmod +x gradlew
           ./gradlew --version
 
-      - name: Validate project
+      - name: Validate MediaCodec implementation
         shell: bash
         run: |
-          set -e
-
-          git diff --check
-
-          echo "Checking MediaCodec implementation..."
-
           grep -q '!info.isEncoder' app/src/main/java/com/gptvideo2anime/pipeline/MediaCodecVideoEngine.kt
           grep -q 'info.isEncoder' app/src/main/java/com/gptvideo2anime/pipeline/MediaCodecVideoEngine.kt
 
           if grep -RIn --exclude-dir=.git 'isDecoder' app/src/main/java; then
-            echo "ERROR: invalid isDecoder symbol found."
+            echo "Invalid isDecoder symbol found."
             exit 1
           fi
 
-          echo "MediaCodec validation passed."
-
-      - name: Build debug APK
+      - name: Build Debug APK
         shell: bash
         run: |
-          set -e
-
-          chmod +x ./gradlew
+          chmod +x gradlew
 
           ./gradlew \
             --no-daemon \
             --stacktrace \
             assembleDebug
 
-      - name: Verify generated APK
+      - name: Verify APK
         shell: bash
         run: |
-          set -e
+          test -f app/build/outputs/apk/debug/app-debug.apk
 
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-
-          test -f "$APK"
-
-          echo "APK successfully generated:"
-          ls -lh "$APK"
-
-      - name: Upload debug APK
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: GPT-Video2Anime-debug
@@ -188,15 +154,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Build summary
+      - name: Build Summary
         shell: bash
         run: |
-          echo "========================================"
-          echo "GPT Video2Anime BUILD SUCCESSFUL"
-          echo "========================================"
-          echo
-          echo "Bundled models:"
-          ls -lh app/src/main/assets/models
-          echo
-          echo "APK:"
+          echo "Build successful."
           ls -lh app/build/outputs/apk/debug/app-debug.apk
