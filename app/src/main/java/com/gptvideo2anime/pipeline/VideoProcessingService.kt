@@ -1,5 +1,3 @@
-// FILE: app/src/main/java/com/gptvideo2anime/pipeline/VideoProcessingService.kt
-
 package com.gptvideo2anime.pipeline
 
 import android.app.Notification
@@ -7,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -64,12 +63,14 @@ class VideoProcessingService : Service() {
         flags: Int,
         startId: Int
     ): Int {
+
         if (intent?.action != ACTION_START) {
             stopSelf(startId)
             return START_NOT_STICKY
         }
 
-        val inputUri = intent.getStringExtra(EXTRA_INPUT_URI)
+        val inputUri =
+            intent.getStringExtra(EXTRA_INPUT_URI)
 
         if (inputUri.isNullOrBlank()) {
             sendProgress("Failed", 0, 0)
@@ -86,8 +87,8 @@ class VideoProcessingService : Service() {
                 )
             } catch (exception: Exception) {
                 handleProcessingError(
-                    exception = exception,
-                    startId = startId
+                    exception,
+                    startId
                 )
             }
         }
@@ -99,53 +100,55 @@ class VideoProcessingService : Service() {
         inputUri: String,
         startId: Int
     ) {
+
         updateNotification("Checking models...")
 
-        modelManager.ensureModels { message ->
-            updateNotification(message)
-        }
+        modelManager.ensureModels()
 
         updateNotification("Opening video...")
 
-        val result = videoProcessor.process(
-            uri = android.net.Uri.parse(inputUri)
-        ) { current, total, stage ->
-            sendProgress(
-                stage = stage,
-                current = current,
-                total = total
-            )
+        val result =
+            videoProcessor.processVideo(
+                uri = Uri.parse(inputUri),
+                strength = 40
+            ) { current, total, stage ->
 
-            val notificationText =
-                if (total > 0) {
-                    "$stage ($current/$total)"
-                } else {
-                    stage
-                }
+                sendProgress(
+                    stage,
+                    current,
+                    total
+                )
 
-            updateNotification(notificationText)
-        }
+                updateNotification(
+                    if (total > 0) {
+                        "$stage ($current/$total)"
+                    } else {
+                        stage
+                    }
+                )
+            }
 
         Log.i(
             "VideoProcessingService",
-            "Processing completed. Preview: ${result.testFramePath}"
+            "Processing completed: ${result.outputFile.absolutePath}"
         )
 
         sendProgress(
-            stage = "Complete",
-            current = 7,
-            total = 7
+            "Complete",
+            1,
+            1
         )
 
         updateNotification("Processing complete")
+
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf(startId)
     }
-
-    private fun handleProcessingError(
+        private fun handleProcessingError(
         exception: Exception,
         startId: Int
     ) {
+
         Log.e(
             "VideoProcessingService",
             "Processing failed",
@@ -153,13 +156,13 @@ class VideoProcessingService : Service() {
         )
 
         val message =
-            exception.message?.takeIf { it.isNotBlank() }
+            exception.message
                 ?: "Unknown processing error"
 
         sendProgress(
-            stage = "Failed",
-            current = 0,
-            total = 0
+            "Failed",
+            0,
+            0
         )
 
         updateNotification("Failed: $message")
@@ -185,12 +188,10 @@ class VideoProcessingService : Service() {
     private fun createNotification(
         text: String
     ): Notification {
+
         val builder =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Notification.Builder(
-                    this,
-                    CHANNEL_ID
-                )
+                Notification.Builder(this, CHANNEL_ID)
             } else {
                 Notification.Builder(this)
             }
@@ -206,6 +207,7 @@ class VideoProcessingService : Service() {
     private fun updateNotification(
         text: String
     ) {
+
         val manager =
             getSystemService(
                 NOTIFICATION_SERVICE
@@ -223,6 +225,7 @@ class VideoProcessingService : Service() {
     }
 
     private fun createNotificationChannel() {
+
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return
         }
@@ -232,21 +235,18 @@ class VideoProcessingService : Service() {
                 NOTIFICATION_SERVICE
             ) as NotificationManager
 
-        val channel =
+        manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
                 "Video Processing",
                 NotificationManager.IMPORTANCE_LOW
             )
-
-        manager.createNotificationChannel(channel)
+        )
     }
 
     override fun onBind(
         intent: Intent?
-    ): IBinder? {
-        return null
-    }
+    ): IBinder? = null
 
     override fun onDestroy() {
         serviceScope.cancel()
