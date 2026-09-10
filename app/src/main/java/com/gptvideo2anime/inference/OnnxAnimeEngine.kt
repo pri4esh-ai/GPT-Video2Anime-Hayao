@@ -6,10 +6,15 @@ import ai.onnxruntime.TensorInfo
 import android.graphics.Bitmap
 import android.util.Log
 import java.nio.FloatBuffer
+import kotlin.math.roundToInt
 
 class OnnxAnimeEngine(
     modelPath: String
 ) : AutoCloseable {
+
+    companion object {
+        private const val TAG = "OnnxAnimeEngine"
+    }
 
     private val environment =
         OrtEnvironment.getEnvironment()
@@ -26,6 +31,7 @@ class OnnxAnimeEngine(
     fun processFrame(
         frame: Bitmap
     ): Bitmap {
+
         require(!frame.isRecycled) {
             "Input frame is recycled."
         }
@@ -36,71 +42,122 @@ class OnnxAnimeEngine(
                     "ONNX model has no input."
                 )
 
-        val tensorInfo =
-            (session.inputInfo[inputName]?.info as? TensorInfo)
+        val inputTensorInfo =
+            session.inputInfo[inputName]?.info as? TensorInfo
                 ?: throw IllegalStateException(
                     "Unable to inspect ONNX input."
                 )
 
         val inputShape =
-            tensorInfo.shape
+            inputTensorInfo.shape
 
         require(inputShape.size == 4) {
-            "Unsupported ONNX input rank: ${inputShape.size}"
+            "Unsupported ONNX input rank: ${inputShape.size}. " +
+                "Expected rank 4."
         }
 
-        val isNchw =
-            inputShape[1] == 3L
+        val inputLayout =
+            detectLayout(
+                inputShape,
+                "input"
+            )
 
         val modelHeight =
-            resolveDimension(
-                if (isNchw) inputShape[2] else inputShape[1],
-                512
-            )
+            when (inputLayout) {
+                Layout.NCHW ->
+                    resolveDimension(
+                        inputShape[2],
+                        512
+                    )
+
+                Layout.NHWC ->
+                    resolveDimension(
+                        inputShape[1],
+                        512
+                    )
+            }
 
         val modelWidth =
-            resolveDimension(
-                if (isNchw) inputShape[3] else inputShape[2],
-                512
-            )
+            when (inputLayout) {
+                Layout.NCHW ->
+                    resolveDimension(
+                        inputShape[3],
+                        512
+                    )
+
+                Layout.NHWC ->
+                    resolveDimension(
+                        inputShape[2],
+                        512
+                    )
+            }
+
+        require(modelWidth > 0 && modelHeight > 0) {
+            "Invalid ONNX input dimensions: " +
+                "${modelWidth}x$modelHeight"
+        }
+
+        Log.i(
+            TAG,
+            "Input name=$inputName " +
+                "shape=${inputShape.contentToString()} " +
+                "layout=$inputLayout " +
+                "size=${modelWidth}x$modelHeight"
+        )
 
         val resized =
-            Bitmap.createScaledBitmap(
-                frame,
-                modelWidth,
-                modelHeight,
-                true
-            )
+            if (
+                frame.width == modelWidth &&
+                frame.height == modelHeight
+            ) {
+                frame
+            } else {
+                Bitmap.createScaledBitmap(
+                    frame,
+                    modelWidth,
+                    modelHeight,
+                    true
+                )
+            }
+
+        val ownsResizedBitmap =
+            resized !== frame
 
         try {
+
             val tensorData =
-                if (isNchw) {
-                    bitmapToNchwFloatArray(resized)
-                } else {
-                    bitmapToNhwcFloatArray(resized)
+                when (inputLayout) {
+
+                    Layout.NCHW ->
+                        bitmapToNchwFloatArray(
+                            resized
+                        )
+
+                    Layout.NHWC ->
+                        bitmapToNhwcFloatArray(
+                            resized
+                        )
                 }
 
             val shape =
-                if (isNchw) {
-                    longArrayOf(
-                        1L,
-                        3L,
-                        modelHeight.toLong(),
-                        modelWidth.toLong()
-                    )
-                } else {
-                    longArrayOf(
-                        1L,
-                        modelHeight.toLong(),
-                        modelWidth.toLong(),
-                        3L
-                    )
-                }
+                when (inputLayout) {
 
-            Log.i(
-                "OnnxAnimeEngine",
-                "Input tensor=${shape.contentToString()} layout=${if (isNchw) "NCHW" else "NHWC"}"
-            )
+                    Layout.NCHW ->
+                        longArrayOf(
+                            1L,
+                            3L,
+                            modelHeight.toLong(),
+                            modelWidth.toLong()
+                        )
+
+                    Layout.NHWC ->
+                        longArrayOf(
+                            1L,
+                            modelHeight.toLong(),
+                            modelWidth.toLong(),
+                            3L
+                        )
+                }
 
             OnnxTensor.createTensor(
                 environment,
@@ -118,17 +175,42 @@ class OnnxAnimeEngine(
                         "ONNX model returned no output."
                     }
 
+                    val outputValue =
+                        result[0].value
+
+                    val outputInfo =
+                        session.outputInfo[
+                            session.outputNames.first()
+                        ]?.info as? TensorInfo
+
+                    val outputShape =
+                        outputInfo?.shape
+
+                    Log.i(
+                        TAG,
+                        "Output shape=" +
+                            outputShape?.contentToString() +
+                            " type=" +
+                            outputValue::class.java.name
+                    )
+
                     return outputToBitmap(
-                        result[0].value,
-                        frame.width,
-                        frame.height,
-                        modelWidth,
-                        modelHeight
+                        output = outputValue,
+                        outputShape = outputShape,
+                        outputWidth = frame.width,
+                        outputHeight = frame.height,
+                        fallbackWidth = modelWidth,
+                        fallbackHeight = modelHeight
                     )
                 }
             }
+
         } finally {
-            if (!resized.isRecycled) {
+
+            if (
+                ownsResizedBitmap &&
+                !resized.isRecycled
+            ) {
                 resized.recycle()
             }
         }
@@ -143,11 +225,18 @@ class OnnxAnimeEngine(
     private fun bitmapToNchwFloatArray(
         bitmap: Bitmap
     ): FloatArray {
-        val width = bitmap.width
-        val height = bitmap.height
-        val pixelCount = width * height
 
-        val pixels = IntArray(pixelCount)
+        val width =
+            bitmap.width
+
+        val height =
+            bitmap.height
+
+        val pixelCount =
+            width * height
+
+        val pixels =
+            IntArray(pixelCount)
 
         bitmap.getPixels(
             pixels,
@@ -163,25 +252,27 @@ class OnnxAnimeEngine(
             FloatArray(pixelCount * 3)
 
         for (i in 0 until pixelCount) {
-            val pixel = pixels[i]
 
-            val r =
-                ((pixel shr 16) and 0xFF) / 255f
+            val pixel =
+                pixels[i]
 
-            val g =
-                ((pixel shr 8) and 0xFF) / 255f
+            val red =
+                ((pixel shr 16) and 0xFF) / 127.5f - 1f
 
-            val b =
-                (pixel and 0xFF) / 255f
+            val green =
+                ((pixel shr 8) and 0xFF) / 127.5f - 1f
+
+            val blue =
+                (pixel and 0xFF) / 127.5f - 1f
 
             data[i] =
-                r * 2f - 1f
+                red
 
             data[pixelCount + i] =
-                g * 2f - 1f
+                green
 
             data[pixelCount * 2 + i] =
-                b * 2f - 1f
+                blue
         }
 
         return data
@@ -190,8 +281,12 @@ class OnnxAnimeEngine(
     private fun bitmapToNhwcFloatArray(
         bitmap: Bitmap
     ): FloatArray {
-        val width = bitmap.width
-        val height = bitmap.height
+
+        val width =
+            bitmap.width
+
+        val height =
+            bitmap.height
 
         val pixels =
             IntArray(width * height)
@@ -209,17 +304,19 @@ class OnnxAnimeEngine(
         val data =
             FloatArray(width * height * 3)
 
-        var index = 0
+        var index =
+            0
 
         for (pixel in pixels) {
-            data[index++] =
-                (((pixel shr 16) and 0xFF) / 255f) * 2f - 1f
 
             data[index++] =
-                (((pixel shr 8) and 0xFF) / 255f) * 2f - 1f
+                ((pixel shr 16) and 0xFF) / 127.5f - 1f
 
             data[index++] =
-                ((pixel and 0xFF) / 255f) * 2f - 1f
+                ((pixel shr 8) and 0xFF) / 127.5f - 1f
+
+            data[index++] =
+                (pixel and 0xFF) / 127.5f - 1f
         }
 
         return data
@@ -227,68 +324,164 @@ class OnnxAnimeEngine(
 
     private fun outputToBitmap(
         output: Any,
+        outputShape: LongArray?,
         outputWidth: Int,
         outputHeight: Int,
-        modelWidth: Int,
-        modelHeight: Int
+        fallbackWidth: Int,
+        fallbackHeight: Int
     ): Bitmap {
+
         val data =
             extractFloatArray(output)
 
-        val pixelCount =
-            modelWidth * modelHeight
+        require(data.isNotEmpty()) {
+            "ONNX output is empty."
+        }
 
-        require(data.size >= pixelCount * 3) {
-            "ONNX output contains insufficient pixel data: ${data.size}"
+        val shape =
+            outputShape?.takeIf {
+                it.size == 4
+            }
+
+        val layout =
+            if (shape != null) {
+                detectLayout(
+                    shape,
+                    "output"
+                )
+            } else {
+                inferOutputLayout(
+                    data.size,
+                    fallbackWidth,
+                    fallbackHeight
+                )
+            }
+
+        val modelWidth: Int
+        val modelHeight: Int
+        val pixelCount: Int
+
+        if (shape != null) {
+
+            when (layout) {
+
+                Layout.NCHW -> {
+
+                    modelHeight =
+                        resolveDimension(
+                            shape[2],
+                            fallbackHeight
+                        )
+
+                    modelWidth =
+                        resolveDimension(
+                            shape[3],
+                            fallbackWidth
+                        )
+                }
+
+                Layout.NHWC -> {
+
+                    modelHeight =
+                        resolveDimension(
+                            shape[1],
+                            fallbackHeight
+                        )
+
+                    modelWidth =
+                        resolveDimension(
+                            shape[2],
+                            fallbackWidth
+                        )
+                }
+            }
+
+            pixelCount =
+                modelWidth * modelHeight
+
+        } else {
+
+            modelWidth =
+                fallbackWidth
+
+            modelHeight =
+                fallbackHeight
+
+            pixelCount =
+                modelWidth * modelHeight
+        }
+
+        require(
+            data.size >= pixelCount * 3
+        ) {
+            "ONNX output contains insufficient pixel data. " +
+                "elements=${data.size}, " +
+                "required=${pixelCount * 3}, " +
+                "shape=${shape?.contentToString()}"
         }
 
         val pixels =
             IntArray(pixelCount)
 
-        val isNchwOutput =
-            data.size == pixelCount * 3 &&
-                looksLikeNchwOutput(data, pixelCount)
+        when (layout) {
 
-        if (isNchwOutput) {
-            for (i in 0 until pixelCount) {
-                val r =
-                    outputValueToByte(data[i])
+            Layout.NCHW -> {
 
-                val g =
-                    outputValueToByte(
-                        data[pixelCount + i]
-                    )
+                for (i in 0 until pixelCount) {
 
-                val b =
-                    outputValueToByte(
-                        data[pixelCount * 2 + i]
-                    )
+                    val red =
+                        outputValueToByte(
+                            data[i]
+                        )
 
-                pixels[i] =
-                    (255 shl 24) or
-                        (r shl 16) or
-                        (g shl 8) or
-                        b
+                    val green =
+                        outputValueToByte(
+                            data[pixelCount + i]
+                        )
+
+                    val blue =
+                        outputValueToByte(
+                            data[pixelCount * 2 + i]
+                        )
+
+                    pixels[i] =
+                        argb(
+                            red,
+                            green,
+                            blue
+                        )
+                }
             }
-        } else {
-            for (i in 0 until pixelCount) {
-                val base =
-                    i * 3
 
-                val r =
-                    outputValueToByte(data[base])
+            Layout.NHWC -> {
 
-                val g =
-                    outputValueToByte(data[base + 1])
+                for (i in 0 until pixelCount) {
 
-                val b =
-                    outputValueToByte(data[base + 2])
+                    val base =
+                        i * 3
 
-                pixels[i] =
-                    (255 shl 24) or
-                        (r shl 16) or
-                        (g shl 8) or
-                        b
+                    val red =
+                        outputValueToByte(
+                            data[base]
+                        )
+
+                    val green =
+                        outputValueToByte(
+                            data[base + 1]
+                        )
+
+                    val blue =
+                        outputValueToByte(
+                            data[base + 2]
+                        )
+
+                    pixels[i] =
+                        argb(
+                            red,
+                            green,
+                            blue
+                        )
+                }
             }
         }
 
@@ -311,12 +504,12 @@ class OnnxAnimeEngine(
 
         if (
             modelWidth == outputWidth &&
-                modelHeight == outputHeight
+            modelHeight == outputHeight
         ) {
             return modelBitmap
         }
 
-        val scaled =
+        val finalBitmap =
             Bitmap.createScaledBitmap(
                 modelBitmap,
                 outputWidth,
@@ -324,73 +517,117 @@ class OnnxAnimeEngine(
                 true
             )
 
-        modelBitmap.recycle()
+        if (!modelBitmap.isRecycled) {
+            modelBitmap.recycle()
+        }
 
-        return scaled
+        return finalBitmap
     }
 
-    private fun looksLikeNchwOutput(
-        data: FloatArray,
-        pixelCount: Int
-    ): Boolean {
-        if (data.size != pixelCount * 3) {
-            return false
+    private fun inferOutputLayout(
+        dataSize: Int,
+        width: Int,
+        height: Int
+    ): Layout {
+
+        val expected =
+            width * height * 3
+
+        require(dataSize >= expected) {
+            "Unable to infer ONNX output layout. " +
+                "elements=$dataSize expectedAtLeast=$expected"
         }
 
-        val sampleCount =
-            minOf(pixelCount, 32)
+        /*
+         * AnimeGANv3's normal ONNX export is NCHW.
+         *
+         * If the output TensorInfo is unavailable,
+         * use NCHW rather than guessing from pixel values.
+         */
+        return Layout.NCHW
+    }
 
-        var channelRangeScore = 0
+    private fun detectLayout(
+        shape: LongArray,
+        tensorName: String
+    ): Layout {
 
-        for (i in 0 until sampleCount) {
-            val r =
-                data[i]
-
-            val g =
-                data[pixelCount + i]
-
-            val b =
-                data[pixelCount * 2 + i]
-
-            if (
-                r in -1.01f..1.01f &&
-                g in -1.01f..1.01f &&
-                b in -1.01f..1.01f
-            ) {
-                channelRangeScore++
-            }
+        require(shape.size == 4) {
+            "Unsupported $tensorName tensor rank: " +
+                "${shape.size}. " +
+                "Expected rank 4."
         }
 
-        return channelRangeScore >= sampleCount / 2
+        val channelFirst =
+            shape[1] == 3L
+
+        val channelLast =
+            shape[3] == 3L
+
+        return when {
+
+            channelFirst && !channelLast ->
+                Layout.NCHW
+
+            channelLast && !channelFirst ->
+                Layout.NHWC
+
+            channelFirst && channelLast ->
+                throw IllegalStateException(
+                    "Ambiguous $tensorName tensor shape: " +
+                        shape.contentToString()
+                )
+
+            else ->
+                throw IllegalStateException(
+                    "Unsupported $tensorName tensor shape: " +
+                        shape.contentToString() +
+                        ". Expected NCHW or NHWC RGB tensor."
+                )
+        }
     }
 
     private fun extractFloatArray(
         value: Any
     ): FloatArray {
+
         return when (value) {
+
             is FloatArray ->
                 value
 
             is Array<*> -> {
+
                 val list =
                     ArrayList<Float>()
 
-                fun visit(value: Any?) {
-                    when (value) {
+                fun visit(
+                    current: Any?
+                ) {
+
+                    when (current) {
+
                         is FloatArray ->
-                            value.forEach(list::add)
+                            current.forEach {
+                                list.add(it)
+                            }
 
                         is Array<*> ->
-                            value.forEach(::visit)
+                            current.forEach {
+                                visit(it)
+                            }
 
                         is Number ->
-                            list.add(value.toFloat())
+                            list.add(
+                                current.toFloat()
+                            )
 
                         null -> Unit
 
                         else ->
                             throw IllegalStateException(
-                                "Unsupported output element: ${value::class.java.name}"
+                                "Unsupported ONNX output element: " +
+                                    current::class.java.name
                             )
                     }
                 }
@@ -402,15 +639,46 @@ class OnnxAnimeEngine(
 
             else ->
                 throw IllegalStateException(
-                    "Unsupported output type: ${value::class.java.name}"
+                    "Unsupported ONNX output type: " +
+                        value::class.java.name
                 )
         }
+    }
+
+    private fun outputValueToByte(
+        value: Float
+    ): Int {
+
+        /*
+         * AnimeGANv3 outputs RGB values in [-1, 1].
+         */
+        val normalized =
+            ((value + 1f) * 0.5f)
+                .coerceIn(0f, 1f)
+
+        return (
+            normalized * 255f
+        ).roundToInt()
+            .coerceIn(0, 255)
+    }
+
+    private fun argb(
+        red: Int,
+        green: Int,
+        blue: Int
+    ): Int {
+
+        return (255 shl 24) or
+            (red shl 16) or
+            (green shl 8) or
+            blue
     }
 
     private fun resolveDimension(
         dimension: Long,
         fallback: Int
     ): Int {
+
         return if (dimension > 0L) {
             dimension.toInt()
         } else {
@@ -418,19 +686,9 @@ class OnnxAnimeEngine(
         }
     }
 
-    private fun outputValueToByte(
-        value: Float
-    ): Int {
-        val normalized =
-            if (value in -1f..1f) {
-                (value + 1f) * 0.5f
-            } else {
-                value / 255f
-            }
-
-        return (
-            normalized.coerceIn(0f, 1f) * 255f
-        ).toInt()
+    private enum class Layout {
+        NCHW,
+        NHWC
     }
 
     override fun close() {
