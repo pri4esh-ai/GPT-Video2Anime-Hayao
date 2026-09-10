@@ -337,3 +337,121 @@ private fun outputToBitmap(
         true
     )
 }
+private fun extractFloatArray(
+    value: Any
+): FloatArray {
+
+    return when (value) {
+
+        is FloatArray ->
+            value
+
+        is Array<*> -> {
+
+            /*
+             * Fast path for ONNX outputs shaped as Array<FloatArray>.
+             */
+            if (
+                value.isNotEmpty() &&
+                value[0] is FloatArray
+            ) {
+
+                var total = 0
+
+                for (row in value) {
+                    total += (row as FloatArray).size
+                }
+
+                val out = FloatArray(total)
+
+                var offset = 0
+
+                for (row in value) {
+
+                    val array = row as FloatArray
+
+                    System.arraycopy(
+                        array,
+                        0,
+                        out,
+                        offset,
+                        array.size
+                    )
+
+                    offset += array.size
+                }
+
+                return out
+            }
+
+            /*
+             * Generic fallback for nested ONNX arrays.
+             */
+            val list = ArrayList<Float>()
+
+            fun visit(any: Any?) {
+
+                when (any) {
+
+                    is FloatArray ->
+                        list.addAll(any.toList())
+
+                    is Array<*> ->
+                        any.forEach { visit(it) }
+
+                    is Number ->
+                        list.add(any.toFloat())
+
+                    null -> Unit
+
+                    else ->
+                        throw IllegalStateException(
+                            "Unsupported ONNX output element: ${any::class.java.name}"
+                        )
+                }
+            }
+
+            visit(value)
+
+            list.toFloatArray()
+        }
+
+        else ->
+            throw IllegalStateException(
+                "Unsupported ONNX output type: ${value::class.java.name}"
+            )
+    }
+}
+
+private fun outputValueToByte(
+    value: Float
+): Int {
+
+    val normalized =
+        ((value + 1f) * 127.5f)
+            .roundToInt()
+
+    return normalized.coerceIn(
+        0,
+        255
+    )
+}
+
+private enum class Layout {
+    NCHW,
+    NHWC
+}
+
+override fun close() {
+
+    try {
+        inputTensor.close()
+    } catch (_: Exception) {
+    }
+
+    try {
+        session.close()
+    } catch (_: Exception) {
+    }
+}
+}
