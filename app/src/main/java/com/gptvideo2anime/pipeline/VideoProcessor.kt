@@ -1,5 +1,3 @@
-// FILE: app/src/main/java/com/gptvideo2anime/pipeline/VideoProcessor.kt
-
 package com.gptvideo2anime.pipeline
 
 import android.content.Context
@@ -19,15 +17,33 @@ data class ProcessingInfo(
     val outputPath: String
 )
 
+data class ProcessVideoResult(
+    val outputFile: File
+)
+
 class VideoProcessor(
     private val context: Context
 ) {
 
-    private val modelManager =
-        ModelManager(context)
+    private val modelManager = ModelManager(context)
+    private val codecEngine = MediaCodecVideoEngine(context)
 
-    private val codecEngine =
-        MediaCodecVideoEngine(context)
+    fun processVideo(
+        uri: Uri,
+        strength: Int,
+        onProgress: (current: Int, total: Int, stage: String) -> Unit
+    ): ProcessVideoResult {
+
+        val info = process(
+            uri = uri,
+            strength = strength / 100f,
+            onProgress = onProgress
+        )
+
+        return ProcessVideoResult(
+            outputFile = File(info.outputPath)
+        )
+    }
 
     fun process(
         uri: Uri,
@@ -43,14 +59,9 @@ class VideoProcessor(
             "Strength must be between 0 and 1."
         }
 
-        onProgress(
-            0,
-            100,
-            "Inspecting video"
-        )
+        onProgress(0, 100, "Inspecting video")
 
-        val videoInfo =
-            codecEngine.inspect(uri)
+        val videoInfo = codecEngine.inspect(uri)
 
         if (videoInfo.durationUs <= 0L) {
             throw IllegalStateException(
@@ -58,11 +69,7 @@ class VideoProcessor(
             )
         }
 
-        onProgress(
-            1,
-            100,
-            "Preparing AnimeGAN"
-        )
+        onProgress(1, 100, "Preparing AnimeGAN")
 
         val modelPath =
             modelManager.animeModelPath()
@@ -71,10 +78,7 @@ class VideoProcessor(
                 )
 
         val outputDirectory =
-            File(
-                context.filesDir,
-                "output"
-            ).apply {
+            File(context.filesDir, "output").apply {
                 mkdirs()
             }
 
@@ -96,23 +100,13 @@ class VideoProcessor(
                 val progress =
                     if (totalFrames > 0) {
                         (
-                            currentFrame
-                                .toLong()
-                                .times(98L)
-                                .div(totalFrames)
-                                .plus(1L)
-                        )
-                            .coerceIn(1L, 99L)
-                            .toInt()
+                            currentFrame.toLong() * 98L / totalFrames + 1L
+                        ).coerceIn(1L, 99L).toInt()
                     } else {
                         1
                     }
 
-                onProgress(
-                    progress,
-                    100,
-                    stage
-                )
+                onProgress(progress, 100, stage)
             }
         }
 
@@ -122,11 +116,7 @@ class VideoProcessor(
             )
         }
 
-        onProgress(
-            100,
-            100,
-            "Complete"
-        )
+        onProgress(100, 100, "Complete")
 
         return ProcessingInfo(
             inputUri = uri,
