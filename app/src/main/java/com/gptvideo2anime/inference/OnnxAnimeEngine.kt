@@ -15,29 +15,30 @@ class OnnxAnimeEngine(
         private const val THREADS = 4
     }
 
-    private val environment = OrtEnvironment.getEnvironment()
+    private val environment =
+        OrtEnvironment.getEnvironment()
+
     private val session: OrtSession
 
     private val inputName: String
     private val outputName: String
 
     private val inputLayout: Layout
+    private val outputLayout: Layout
 
     private val modelWidth: Int
     private val modelHeight: Int
 
-    // ---------- Reusable buffers ----------
+    private val outputWidthModel: Int
+    private val outputHeightModel: Int
 
     private val pixelCount: Int
 
     private val inputPixels: IntArray
-
     private val inputFloatBuffer: FloatBuffer
-
     private val inputTensor: OnnxTensor
 
     private val outputPixels: IntArray
-
     private val outputBitmap: Bitmap
 
     init {
@@ -64,29 +65,53 @@ class OnnxAnimeEngine(
         outputName =
             session.outputNames.first()
 
-        val info =
+        val inputInfo =
             session.inputInfo[inputName]!!.info as TensorInfo
 
-        val shape =
-            info.shape
+        val inputShape =
+            inputInfo.shape
 
         inputLayout =
-            if (shape[1] == 3L)
+            if (inputShape[1] == 3L)
                 Layout.NCHW
             else
                 Layout.NHWC
 
         modelWidth =
             if (inputLayout == Layout.NCHW)
-                (shape[3].takeIf { it > 0 } ?: MODEL_SIZE.toLong()).toInt()
+                (inputShape[3].takeIf { it > 0 } ?: MODEL_SIZE.toLong()).toInt()
             else
-                (shape[2].takeIf { it > 0 } ?: MODEL_SIZE.toLong()).toInt()
+                (inputShape[2].takeIf { it > 0 } ?: MODEL_SIZE.toLong()).toInt()
 
         modelHeight =
             if (inputLayout == Layout.NCHW)
-                (shape[2].takeIf { it > 0 } ?: MODEL_SIZE.toLong()).toInt()
+                (inputShape[2].takeIf { it > 0 } ?: MODEL_SIZE.toLong()).toInt()
             else
-                (shape[1].takeIf { it > 0 } ?: MODEL_SIZE.toLong()).toInt()
+                (inputShape[1].takeIf { it > 0 } ?: MODEL_SIZE.toLong()).toInt()
+
+        val outputInfo =
+            session.outputInfo[outputName]!!.info as TensorInfo
+
+        val outputShape =
+            outputInfo.shape
+
+        outputLayout =
+            if (outputShape[1] == 3L)
+                Layout.NCHW
+            else
+                Layout.NHWC
+
+        outputWidthModel =
+            if (outputLayout == Layout.NCHW)
+                (outputShape[3].takeIf { it > 0 } ?: modelWidth.toLong()).toInt()
+            else
+                (outputShape[2].takeIf { it > 0 } ?: modelWidth.toLong()).toInt()
+
+        outputHeightModel =
+            if (outputLayout == Layout.NCHW)
+                (outputShape[2].takeIf { it > 0 } ?: modelHeight.toLong()).toInt()
+            else
+                (outputShape[1].takeIf { it > 0 } ?: modelHeight.toLong()).toInt()
 
         pixelCount =
             modelWidth * modelHeight
@@ -95,9 +120,7 @@ class OnnxAnimeEngine(
             IntArray(pixelCount)
 
         inputFloatBuffer =
-            FloatBuffer.allocate(
-                pixelCount * CHANNELS
-            )
+            FloatBuffer.allocate(pixelCount * CHANNELS)
 
         inputTensor =
             OnnxTensor.createTensor(
@@ -120,338 +143,355 @@ class OnnxAnimeEngine(
             )
 
         outputPixels =
-            IntArray(pixelCount)
+            IntArray(outputWidthModel * outputHeightModel)
 
         outputBitmap =
             Bitmap.createBitmap(
-                modelWidth,
-                modelHeight,
+                outputWidthModel,
+                outputHeightModel,
                 Bitmap.Config.ARGB_8888
             )
     }
-fun processFrame(
-    frame: Bitmap
-): Bitmap {
 
-    require(!frame.isRecycled) {
-        "Input frame is recycled."
-    }
+    fun inputNames(): Set<String> =
+        session.inputNames
 
-    val resized =
-        if (
-            frame.width == modelWidth &&
-            frame.height == modelHeight
-        ) {
-            frame
-        } else {
-            Bitmap.createScaledBitmap(
-                frame,
-                modelWidth,
-                modelHeight,
-                true
-            )
+    fun outputNames(): Set<String> =
+        session.outputNames
+    fun processFrame(
+        frame: Bitmap
+    ): Bitmap {
+
+        require(!frame.isRecycled) {
+            "Input frame is recycled."
         }
 
-    val ownsResized =
-        resized !== frame
-
-    try {
-
-        updateInputTensor(resized)
-
-        session.run(
-            mapOf(inputName to inputTensor)
-        ).use { result ->
-
-            require(result.size() > 0) {
-                "ONNX model returned no output."
+        val resized =
+            if (
+                frame.width == modelWidth &&
+                frame.height == modelHeight
+            ) {
+                frame
+            } else {
+                Bitmap.createScaledBitmap(
+                    frame,
+                    modelWidth,
+                    modelHeight,
+                    true
+                )
             }
 
-            return outputToBitmap(
-                output = result[0].value,
-                outputWidth = frame.width,
-                outputHeight = frame.height
-            )
-        }
+        val ownsResized =
+            resized !== frame
 
-    } finally {
+        try {
 
-        if (
-            ownsResized &&
-            !resized.isRecycled
-        ) {
-            resized.recycle()
-        }
-    }
-}
+            updateInputTensor(resized)
 
-fun infer(
-    frame: Bitmap
-): Bitmap {
-    return processFrame(frame)
-}
+            session.run(
+                mapOf(inputName to inputTensor)
+            ).use { result ->
 
-private fun updateInputTensor(
-    bitmap: Bitmap
-) {
-
-    bitmap.getPixels(
-        inputPixels,
-        0,
-        modelWidth,
-        0,
-        0,
-        modelWidth,
-        modelHeight
-    )
-
-    inputFloatBuffer.position(0)
-
-    if (inputLayout == Layout.NCHW) {
-
-        for (i in 0 until pixelCount) {
-            inputFloatBuffer.put(
-                i,
-                ((inputPixels[i] shr 16 and 255) / 127.5f) - 1f
-            )
-        }
-
-        val greenOffset =
-            pixelCount
-
-        for (i in 0 until pixelCount) {
-            inputFloatBuffer.put(
-                greenOffset + i,
-                ((inputPixels[i] shr 8 and 255) / 127.5f) - 1f
-            )
-        }
-
-        val blueOffset =
-            pixelCount * 2
-
-        for (i in 0 until pixelCount) {
-            inputFloatBuffer.put(
-                blueOffset + i,
-                ((inputPixels[i] and 255) / 127.5f) - 1f
-            )
-        }
-
-    } else {
-
-        var index = 0
-
-        for (pixel in inputPixels) {
-
-            inputFloatBuffer.put(
-                index++,
-                ((pixel shr 16 and 255) / 127.5f) - 1f
-            )
-
-            inputFloatBuffer.put(
-                index++,
-                ((pixel shr 8 and 255) / 127.5f) - 1f
-            )
-
-            inputFloatBuffer.put(
-                index++,
-                ((pixel and 255) / 127.5f) - 1f
-            )
-        }
-    }
-
-    inputFloatBuffer.position(0)
-}
-private fun outputToBitmap(
-    output: Any,
-    outputWidth: Int,
-    outputHeight: Int
-): Bitmap {
-
-    val data =
-        extractFloatArray(output)
-
-    require(data.size >= pixelCount * 3) {
-        "ONNX output too small."
-    }
-
-    if (inputLayout == Layout.NCHW) {
-
-        val gOffset = pixelCount
-        val bOffset = pixelCount * 2
-
-        for (i in 0 until pixelCount) {
-
-            val r = outputValueToByte(data[i])
-            val g = outputValueToByte(data[gOffset + i])
-            val b = outputValueToByte(data[bOffset + i])
-
-            outputPixels[i] =
-                (255 shl 24) or
-                (r shl 16) or
-                (g shl 8) or
-                b
-        }
-
-    } else {
-
-        var index = 0
-
-        for (i in 0 until pixelCount) {
-
-            val r = outputValueToByte(data[index++])
-            val g = outputValueToByte(data[index++])
-            val b = outputValueToByte(data[index++])
-
-            outputPixels[i] =
-                (255 shl 24) or
-                (r shl 16) or
-                (g shl 8) or
-                b
-        }
-    }
-
-    outputBitmap.setPixels(
-        outputPixels,
-        0,
-        modelWidth,
-        0,
-        0,
-        modelWidth,
-        modelHeight
-    )
-
-    if (
-        outputWidth == modelWidth &&
-        outputHeight == modelHeight
-    ) {
-        return outputBitmap.copy(
-            Bitmap.Config.ARGB_8888,
-            false
-        )
-    }
-
-    return Bitmap.createScaledBitmap(
-        outputBitmap,
-        outputWidth,
-        outputHeight,
-        true
-    )
-}
-private fun extractFloatArray(
-    value: Any
-): FloatArray {
-
-    return when (value) {
-
-        is FloatArray ->
-            value
-
-        is Array<*> -> {
-
-            /*
-             * Fast path for ONNX outputs shaped as Array<FloatArray>.
-             */
-            if (
-                value.isNotEmpty() &&
-                value[0] is FloatArray
-            ) {
-
-                var total = 0
-
-                for (row in value) {
-                    total += (row as FloatArray).size
+                require(result.size() > 0) {
+                    "ONNX model returned no output."
                 }
 
-                val out = FloatArray(total)
+                return outputToBitmap(
+                    output = result[0].value,
+                    outputWidth = frame.width,
+                    outputHeight = frame.height
+                )
+            }
 
-                var offset = 0
+        } finally {
 
-                for (row in value) {
+            if (
+                ownsResized &&
+                !resized.isRecycled
+            ) {
+                resized.recycle()
+            }
+        }
+    }
 
-                    val array = row as FloatArray
+    fun infer(
+        frame: Bitmap
+    ): Bitmap =
+        processFrame(frame)
 
-                    System.arraycopy(
-                        array,
-                        0,
-                        out,
-                        offset,
-                        array.size
+    private fun updateInputTensor(
+        bitmap: Bitmap
+    ) {
+
+        bitmap.getPixels(
+            inputPixels,
+            0,
+            modelWidth,
+            0,
+            0,
+            modelWidth,
+            modelHeight
+        )
+
+        inputFloatBuffer.position(0)
+
+        if (inputLayout == Layout.NCHW) {
+
+            val greenOffset = pixelCount
+            val blueOffset = pixelCount * 2
+
+            for (i in 0 until pixelCount) {
+
+                val pixel = inputPixels[i]
+
+                inputFloatBuffer.put(
+                    i,
+                    ((pixel shr 16 and 255) / 127.5f) - 1f
+                )
+
+                inputFloatBuffer.put(
+                    greenOffset + i,
+                    ((pixel shr 8 and 255) / 127.5f) - 1f
+                )
+
+                inputFloatBuffer.put(
+                    blueOffset + i,
+                    ((pixel and 255) / 127.5f) - 1f
+                )
+            }
+
+        } else {
+
+            var index = 0
+
+            for (pixel in inputPixels) {
+
+                inputFloatBuffer.put(
+                    index++,
+                    ((pixel shr 16 and 255) / 127.5f) - 1f
+                )
+
+                inputFloatBuffer.put(
+                    index++,
+                    ((pixel shr 8 and 255) / 127.5f) - 1f
+                )
+
+                inputFloatBuffer.put(
+                    index++,
+                    ((pixel and 255) / 127.5f) - 1f
+                )
+            }
+        }
+
+        inputFloatBuffer.position(0)
+    }
+    private fun outputToBitmap(
+        output: Any,
+        outputWidth: Int,
+        outputHeight: Int
+    ): Bitmap {
+
+        val data = extractFloatArray(output)
+
+        require(
+            data.size >= outputWidthModel * outputHeightModel * 3
+        ) {
+            "ONNX output too small."
+        }
+
+        val pixelCountOut =
+            outputWidthModel * outputHeightModel
+
+        if (outputLayout == Layout.NCHW) {
+
+            val greenOffset = pixelCountOut
+            val blueOffset = pixelCountOut * 2
+
+            for (i in 0 until pixelCountOut) {
+
+                val r =
+                    outputValueToByte(data[i])
+
+                val g =
+                    outputValueToByte(
+                        data[greenOffset + i]
                     )
 
-                    offset += array.size
-                }
+                val b =
+                    outputValueToByte(
+                        data[blueOffset + i]
+                    )
 
-                return out
+                outputPixels[i] =
+                    (255 shl 24) or
+                        (r shl 16) or
+                        (g shl 8) or
+                        b
             }
 
-            /*
-             * Generic fallback for nested ONNX arrays.
-             */
-            val list = ArrayList<Float>()
+        } else {
 
-            fun visit(any: Any?) {
+            var index = 0
 
-                when (any) {
+            for (i in 0 until pixelCountOut) {
 
-                    is FloatArray ->
-                        list.addAll(any.toList())
+                val r =
+                    outputValueToByte(
+                        data[index++]
+                    )
 
-                    is Array<*> ->
-                        any.forEach { visit(it) }
+                val g =
+                    outputValueToByte(
+                        data[index++]
+                    )
 
-                    is Number ->
-                        list.add(any.toFloat())
+                val b =
+                    outputValueToByte(
+                        data[index++]
+                    )
 
-                    null -> Unit
-
-                    else ->
-                        throw IllegalStateException(
-                            "Unsupported ONNX output element: ${any::class.java.name}"
-                        )
-                }
+                outputPixels[i] =
+                    (255 shl 24) or
+                        (r shl 16) or
+                        (g shl 8) or
+                        b
             }
-
-            visit(value)
-
-            list.toFloatArray()
         }
 
-        else ->
-            throw IllegalStateException(
-                "Unsupported ONNX output type: ${value::class.java.name}"
+        outputBitmap.setPixels(
+            outputPixels,
+            0,
+            outputWidthModel,
+            0,
+            0,
+            outputWidthModel,
+            outputHeightModel
+        )
+
+        if (
+            outputWidth == outputWidthModel &&
+            outputHeight == outputHeightModel
+        ) {
+
+            return outputBitmap.copy(
+                Bitmap.Config.ARGB_8888,
+                false
             )
+        }
+
+        return Bitmap.createScaledBitmap(
+            outputBitmap,
+            outputWidth,
+            outputHeight,
+            true
+        )
     }
-}
+    private fun extractFloatArray(
+        value: Any
+    ): FloatArray {
 
-private fun outputValueToByte(
-    value: Float
-): Int {
+        return when (value) {
 
-    val normalized =
-        ((value + 1f) * 127.5f)
-            .roundToInt()
+            is FloatArray ->
+                value
 
-    return normalized.coerceIn(
-        0,
-        255
-    )
-}
+            is Array<*> -> {
 
-private enum class Layout {
-    NCHW,
-    NHWC
-}
+                if (
+                    value.isNotEmpty() &&
+                    value[0] is FloatArray
+                ) {
 
-override fun close() {
+                    var total = 0
 
-    try {
-        inputTensor.close()
-    } catch (_: Exception) {
+                    for (row in value) {
+                        total += (row as FloatArray).size
+                    }
+
+                    val out = FloatArray(total)
+                    var offset = 0
+
+                    for (row in value) {
+
+                        val array = row as FloatArray
+
+                        System.arraycopy(
+                            array,
+                            0,
+                            out,
+                            offset,
+                            array.size
+                        )
+
+                        offset += array.size
+                    }
+
+                    return out
+                }
+
+                val list = ArrayList<Float>()
+
+                fun visit(any: Any?) {
+
+                    when (any) {
+
+                        is FloatArray ->
+                            any.forEach { list.add(it) }
+
+                        is Array<*> ->
+                            any.forEach { visit(it) }
+
+                        is Number ->
+                            list.add(any.toFloat())
+
+                        null -> Unit
+
+                        else ->
+                            throw IllegalStateException(
+                                "Unsupported ONNX output element: ${any::class.java.name}"
+                            )
+                    }
+                }
+
+                visit(value)
+
+                list.toFloatArray()
+            }
+
+            else ->
+                throw IllegalStateException(
+                    "Unsupported ONNX output type: ${value::class.java.name}"
+                )
+        }
     }
 
-    try {
-        session.close()
-    } catch (_: Exception) {
+    private fun outputValueToByte(
+        value: Float
+    ): Int {
+
+        /*
+         * AnimeGAN outputs RGB values in [-1,1].
+         */
+        return (
+            (value + 1f) * 127.5f
+        ).roundToInt().coerceIn(0, 255)
     }
-}
+
+    private enum class Layout {
+        NCHW,
+        NHWC
+    }
+
+    override fun close() {
+
+        try {
+            inputTensor.close()
+        } catch (_: Exception) {
+        }
+
+        try {
+            session.close()
+        } catch (_: Exception) {
+        }
+    }
 }
