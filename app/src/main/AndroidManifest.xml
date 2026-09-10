@@ -29,6 +29,11 @@
 
         </activity>
 
+        <service
+            android:name=".pipeline.VideoProcessingService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProcessing" />
+
     </application>
 
 </manifest>
