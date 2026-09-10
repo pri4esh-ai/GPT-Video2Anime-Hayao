@@ -261,3 +261,79 @@ private fun updateInputTensor(
 
     inputFloatBuffer.position(0)
 }
+private fun outputToBitmap(
+    output: Any,
+    outputWidth: Int,
+    outputHeight: Int
+): Bitmap {
+
+    val data =
+        extractFloatArray(output)
+
+    require(data.size >= pixelCount * 3) {
+        "ONNX output too small."
+    }
+
+    if (inputLayout == Layout.NCHW) {
+
+        val gOffset = pixelCount
+        val bOffset = pixelCount * 2
+
+        for (i in 0 until pixelCount) {
+
+            val r = outputValueToByte(data[i])
+            val g = outputValueToByte(data[gOffset + i])
+            val b = outputValueToByte(data[bOffset + i])
+
+            outputPixels[i] =
+                (255 shl 24) or
+                (r shl 16) or
+                (g shl 8) or
+                b
+        }
+
+    } else {
+
+        var index = 0
+
+        for (i in 0 until pixelCount) {
+
+            val r = outputValueToByte(data[index++])
+            val g = outputValueToByte(data[index++])
+            val b = outputValueToByte(data[index++])
+
+            outputPixels[i] =
+                (255 shl 24) or
+                (r shl 16) or
+                (g shl 8) or
+                b
+        }
+    }
+
+    outputBitmap.setPixels(
+        outputPixels,
+        0,
+        modelWidth,
+        0,
+        0,
+        modelWidth,
+        modelHeight
+    )
+
+    if (
+        outputWidth == modelWidth &&
+        outputHeight == modelHeight
+    ) {
+        return outputBitmap.copy(
+            Bitmap.Config.ARGB_8888,
+            false
+        )
+    }
+
+    return Bitmap.createScaledBitmap(
+        outputBitmap,
+        outputWidth,
+        outputHeight,
+        true
+    )
+}
