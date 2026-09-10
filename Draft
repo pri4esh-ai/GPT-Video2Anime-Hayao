@@ -1,0 +1,131 @@
+package com.gptvideo2anime.inference
+
+import ai.onnxruntime.*
+import android.graphics.Bitmap
+import java.nio.FloatBuffer
+import kotlin.math.roundToInt
+
+class OnnxAnimeEngine(
+    modelPath: String
+) : AutoCloseable {
+
+    companion object {
+        private const val MODEL_SIZE = 512
+        private const val CHANNELS = 3
+        private const val THREADS = 4
+    }
+
+    private val environment = OrtEnvironment.getEnvironment()
+    private val session: OrtSession
+
+    private val inputName: String
+    private val outputName: String
+
+    private val inputLayout: Layout
+
+    private val modelWidth: Int
+    private val modelHeight: Int
+
+    // ---------- Reusable buffers ----------
+
+    private val pixelCount: Int
+
+    private val inputPixels: IntArray
+
+    private val inputFloatBuffer: FloatBuffer
+
+    private val inputTensor: OnnxTensor
+
+    private val outputPixels: IntArray
+
+    private val outputBitmap: Bitmap
+
+    init {
+
+        val options =
+            OrtSession.SessionOptions().apply {
+
+                setIntraOpNumThreads(THREADS)
+                setInterOpNumThreads(1)
+                setOptimizationLevel(
+                    OrtSession.SessionOptions.OptLevel.ALL_OPT
+                )
+            }
+
+        session =
+            environment.createSession(
+                modelPath,
+                options
+            )
+
+        inputName =
+            session.inputNames.first()
+
+        outputName =
+            session.outputNames.first()
+
+        val info =
+            session.inputInfo[inputName]!!.info as TensorInfo
+
+        val shape =
+            info.shape
+
+        inputLayout =
+            if (shape[1] == 3L)
+                Layout.NCHW
+            else
+                Layout.NHWC
+
+        modelWidth =
+            if (inputLayout == Layout.NCHW)
+                (shape[3].takeIf { it > 0 } ?: MODEL_SIZE.toLong()).toInt()
+            else
+                (shape[2].takeIf { it > 0 } ?: MODEL_SIZE.toLong()).toInt()
+
+        modelHeight =
+            if (inputLayout == Layout.NCHW)
+                (shape[2].takeIf { it > 0 } ?: MODEL_SIZE.toLong()).toInt()
+            else
+                (shape[1].takeIf { it > 0 } ?: MODEL_SIZE.toLong()).toInt()
+
+        pixelCount =
+            modelWidth * modelHeight
+
+        inputPixels =
+            IntArray(pixelCount)
+
+        inputFloatBuffer =
+            FloatBuffer.allocate(
+                pixelCount * CHANNELS
+            )
+
+        inputTensor =
+            OnnxTensor.createTensor(
+                environment,
+                inputFloatBuffer,
+                if (inputLayout == Layout.NCHW)
+                    longArrayOf(
+                        1,
+                        3,
+                        modelHeight.toLong(),
+                        modelWidth.toLong()
+                    )
+                else
+                    longArrayOf(
+                        1,
+                        modelHeight.toLong(),
+                        modelWidth.toLong(),
+                        3
+                    )
+            )
+
+        outputPixels =
+            IntArray(pixelCount)
+
+        outputBitmap =
+            Bitmap.createBitmap(
+                modelWidth,
+                modelHeight,
+                Bitmap.Config.ARGB_8888
+            )
+    }
