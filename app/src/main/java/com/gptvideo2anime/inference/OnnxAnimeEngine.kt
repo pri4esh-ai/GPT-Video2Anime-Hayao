@@ -2,9 +2,9 @@ package com.gptvideo2anime.inference
 
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
 import android.graphics.Bitmap
-import android.util.Log
 import java.nio.FloatBuffer
 import kotlin.math.roundToInt
 
@@ -13,14 +13,139 @@ class OnnxAnimeEngine(
 ) : AutoCloseable {
 
     companion object {
-        private const val TAG = "OnnxAnimeEngine"
+
+        private const val DEFAULT_MODEL_SIZE = 512
+
+        private const val INPUT_CHANNELS = 3
+
+        private const val ORT_THREADS = 4
     }
 
     private val environment =
         OrtEnvironment.getEnvironment()
 
-    private val session =
-        environment.createSession(modelPath)
+    private val session: OrtSession
+
+    private val inputName: String
+
+    private val inputShape: LongArray
+
+    private val inputLayout: Layout
+
+    private val modelWidth: Int
+
+    private val modelHeight: Int
+
+    private val inputFloatBuffer: FloatBuffer
+
+    private val inputPixels: IntArray
+
+    private val inputDataSize: Int
+
+    init {
+
+        val sessionOptions =
+            OrtSession.SessionOptions()
+
+        sessionOptions.setIntraOpNumThreads(
+            ORT_THREADS
+        )
+
+        sessionOptions.setInterOpNumThreads(
+            1
+        )
+
+        sessionOptions.setOptimizationLevel(
+            OrtSession.SessionOptions.OptLevel.ALL_OPT
+        )
+
+        session =
+            environment.createSession(
+                modelPath,
+                sessionOptions
+            )
+
+        inputName =
+            session.inputNames.firstOrNull()
+                ?: throw IllegalStateException(
+                    "ONNX model has no input."
+                )
+
+        val inputTensorInfo =
+            session.inputInfo[inputName]?.info as? TensorInfo
+                ?: throw IllegalStateException(
+                    "Unable to inspect ONNX input."
+                )
+
+        inputShape =
+            inputTensorInfo.shape
+
+        require(inputShape.size == 4) {
+            "Unsupported ONNX input rank: " +
+                "${inputShape.size}. Expected rank 4."
+        }
+
+        inputLayout =
+            detectLayout(
+                inputShape,
+                "input"
+            )
+
+        modelHeight =
+            when (inputLayout) {
+
+                Layout.NCHW ->
+                    resolveDimension(
+                        inputShape[2],
+                        DEFAULT_MODEL_SIZE
+                    )
+
+                Layout.NHWC ->
+                    resolveDimension(
+                        inputShape[1],
+                        DEFAULT_MODEL_SIZE
+                    )
+            }
+
+        modelWidth =
+            when (inputLayout) {
+
+                Layout.NCHW ->
+                    resolveDimension(
+                        inputShape[3],
+                        DEFAULT_MODEL_SIZE
+                    )
+
+                Layout.NHWC ->
+                    resolveDimension(
+                        inputShape[2],
+                        DEFAULT_MODEL_SIZE
+                    )
+            }
+
+        require(
+            modelWidth > 0 &&
+                modelHeight > 0
+        ) {
+            "Invalid ONNX input dimensions: " +
+                "${modelWidth}x$modelHeight"
+        }
+
+        inputDataSize =
+            modelWidth *
+                modelHeight *
+                INPUT_CHANNELS
+
+        inputFloatBuffer =
+            FloatBuffer.allocate(
+                inputDataSize
+            )
+
+        inputPixels =
+            IntArray(
+                modelWidth * modelHeight
+            )
+    }
 
     fun inputNames(): Set<String> =
         session.inputNames
@@ -36,75 +161,6 @@ class OnnxAnimeEngine(
             "Input frame is recycled."
         }
 
-        val inputName =
-            session.inputNames.firstOrNull()
-                ?: throw IllegalStateException(
-                    "ONNX model has no input."
-                )
-
-        val inputTensorInfo =
-            session.inputInfo[inputName]?.info as? TensorInfo
-                ?: throw IllegalStateException(
-                    "Unable to inspect ONNX input."
-                )
-
-        val inputShape =
-            inputTensorInfo.shape
-
-        require(inputShape.size == 4) {
-            "Unsupported ONNX input rank: ${inputShape.size}. " +
-                "Expected rank 4."
-        }
-
-        val inputLayout =
-            detectLayout(
-                inputShape,
-                "input"
-            )
-
-        val modelHeight =
-            when (inputLayout) {
-                Layout.NCHW ->
-                    resolveDimension(
-                        inputShape[2],
-                        512
-                    )
-
-                Layout.NHWC ->
-                    resolveDimension(
-                        inputShape[1],
-                        512
-                    )
-            }
-
-        val modelWidth =
-            when (inputLayout) {
-                Layout.NCHW ->
-                    resolveDimension(
-                        inputShape[3],
-                        512
-                    )
-
-                Layout.NHWC ->
-                    resolveDimension(
-                        inputShape[2],
-                        512
-                    )
-            }
-
-        require(modelWidth > 0 && modelHeight > 0) {
-            "Invalid ONNX input dimensions: " +
-                "${modelWidth}x$modelHeight"
-        }
-
-        Log.i(
-            TAG,
-            "Input name=$inputName " +
-                "shape=${inputShape.contentToString()} " +
-                "layout=$inputLayout " +
-                "size=${modelWidth}x$modelHeight"
-        )
-
         val resized =
             if (
                 frame.width == modelWidth &&
@@ -112,6 +168,7 @@ class OnnxAnimeEngine(
             ) {
                 frame
             } else {
+
                 Bitmap.createScaledBitmap(
                     frame,
                     modelWidth,
@@ -125,45 +182,12 @@ class OnnxAnimeEngine(
 
         try {
 
-            val tensorData =
-                when (inputLayout) {
+            val tensor =
+                createInputTensor(
+                    resized
+                )
 
-                    Layout.NCHW ->
-                        bitmapToNchwFloatArray(
-                            resized
-                        )
-
-                    Layout.NHWC ->
-                        bitmapToNhwcFloatArray(
-                            resized
-                        )
-                }
-
-            val shape =
-                when (inputLayout) {
-
-                    Layout.NCHW ->
-                        longArrayOf(
-                            1L,
-                            3L,
-                            modelHeight.toLong(),
-                            modelWidth.toLong()
-                        )
-
-                    Layout.NHWC ->
-                        longArrayOf(
-                            1L,
-                            modelHeight.toLong(),
-                            modelWidth.toLong(),
-                            3L
-                        )
-                }
-
-            OnnxTensor.createTensor(
-                environment,
-                FloatBuffer.wrap(tensorData),
-                shape
-            ).use { inputTensor ->
+            tensor.use { inputTensor ->
 
                 session.run(
                     mapOf(
@@ -185,14 +209,6 @@ class OnnxAnimeEngine(
 
                     val outputShape =
                         outputInfo?.shape
-
-                    Log.i(
-                        TAG,
-                        "Output shape=" +
-                            outputShape?.contentToString() +
-                            " type=" +
-                            outputValue::class.java.name
-                    )
 
                     return outputToBitmap(
                         output = outputValue,
@@ -222,104 +238,125 @@ class OnnxAnimeEngine(
         return processFrame(frame)
     }
 
-    private fun bitmapToNchwFloatArray(
+    private fun createInputTensor(
         bitmap: Bitmap
-    ): FloatArray {
-
-        val width =
-            bitmap.width
-
-        val height =
-            bitmap.height
-
-        val pixelCount =
-            width * height
-
-        val pixels =
-            IntArray(pixelCount)
+    ): OnnxTensor {
 
         bitmap.getPixels(
-            pixels,
+            inputPixels,
             0,
-            width,
+            modelWidth,
             0,
             0,
-            width,
-            height
+            modelWidth,
+            modelHeight
         )
 
-        val data =
-            FloatArray(pixelCount * 3)
+        inputFloatBuffer.clear()
 
-        for (i in 0 until pixelCount) {
+        if (inputLayout == Layout.NCHW) {
 
-            val pixel =
-                pixels[i]
+            val pixelCount =
+                modelWidth * modelHeight
 
-            val red =
-                ((pixel shr 16) and 0xFF) / 127.5f - 1f
+            /*
+             * R plane
+             */
+            for (i in 0 until pixelCount) {
 
-            val green =
-                ((pixel shr 8) and 0xFF) / 127.5f - 1f
+                val pixel =
+                    inputPixels[i]
 
-            val blue =
-                (pixel and 0xFF) / 127.5f - 1f
+                inputFloatBuffer.put(
+                    i,
+                    ((pixel shr 16) and 0xFF) /
+                        127.5f - 1f
+                )
+            }
 
-            data[i] =
-                red
+            /*
+             * G plane
+             */
+            for (i in 0 until pixelCount) {
 
-            data[pixelCount + i] =
-                green
+                val pixel =
+                    inputPixels[i]
 
-            data[pixelCount * 2 + i] =
-                blue
+                inputFloatBuffer.put(
+                    pixelCount + i,
+                    ((pixel shr 8) and 0xFF) /
+                        127.5f - 1f
+                )
+            }
+
+            /*
+             * B plane
+             */
+            for (i in 0 until pixelCount) {
+
+                val pixel =
+                    inputPixels[i]
+
+                inputFloatBuffer.put(
+                    pixelCount * 2 + i,
+                    (pixel and 0xFF) /
+                        127.5f - 1f
+                )
+            }
+
+        } else {
+
+            var index = 0
+
+            for (pixel in inputPixels) {
+
+                inputFloatBuffer.put(
+                    index++,
+                    ((pixel shr 16) and 0xFF) /
+                        127.5f - 1f
+                )
+
+                inputFloatBuffer.put(
+                    index++,
+                    ((pixel shr 8) and 0xFF) /
+                        127.5f - 1f
+                )
+
+                inputFloatBuffer.put(
+                    index++,
+                    (pixel and 0xFF) /
+                        127.5f - 1f
+                )
+            }
         }
 
-        return data
-    }
+        inputFloatBuffer.position(0)
 
-    private fun bitmapToNhwcFloatArray(
-        bitmap: Bitmap
-    ): FloatArray {
+        val shape =
+            when (inputLayout) {
 
-        val width =
-            bitmap.width
+                Layout.NCHW ->
+                    longArrayOf(
+                        1L,
+                        3L,
+                        modelHeight.toLong(),
+                        modelWidth.toLong()
+                    )
 
-        val height =
-            bitmap.height
+                Layout.NHWC ->
+                    longArrayOf(
+                        1L,
+                        modelHeight.toLong(),
+                        modelWidth.toLong(),
+                        3L
+                    )
+            }
 
-        val pixels =
-            IntArray(width * height)
-
-        bitmap.getPixels(
-            pixels,
-            0,
-            width,
-            0,
-            0,
-            width,
-            height
+        return OnnxTensor.createTensor(
+            environment,
+            inputFloatBuffer,
+            shape
         )
-
-        val data =
-            FloatArray(width * height * 3)
-
-        var index =
-            0
-
-        for (pixel in pixels) {
-
-            data[index++] =
-                ((pixel shr 16) and 0xFF) / 127.5f - 1f
-
-            data[index++] =
-                ((pixel shr 8) and 0xFF) / 127.5f - 1f
-
-            data[index++] =
-                (pixel and 0xFF) / 127.5f - 1f
-        }
-
-        return data
     }
 
     private fun outputToBitmap(
@@ -345,11 +382,14 @@ class OnnxAnimeEngine(
 
         val layout =
             if (shape != null) {
+
                 detectLayout(
                     shape,
                     "output"
                 )
+
             } else {
+
                 inferOutputLayout(
                     data.size,
                     fallbackWidth,
@@ -359,7 +399,6 @@ class OnnxAnimeEngine(
 
         val modelWidth: Int
         val modelHeight: Int
-        val pixelCount: Int
 
         if (shape != null) {
 
@@ -396,9 +435,6 @@ class OnnxAnimeEngine(
                 }
             }
 
-            pixelCount =
-                modelWidth * modelHeight
-
         } else {
 
             modelWidth =
@@ -406,82 +442,82 @@ class OnnxAnimeEngine(
 
             modelHeight =
                 fallbackHeight
-
-            pixelCount =
-                modelWidth * modelHeight
         }
+
+        val pixelCount =
+            modelWidth * modelHeight
 
         require(
             data.size >= pixelCount * 3
         ) {
             "ONNX output contains insufficient pixel data. " +
                 "elements=${data.size}, " +
-                "required=${pixelCount * 3}, " +
-                "shape=${shape?.contentToString()}"
+                "required=${pixelCount * 3}"
         }
 
         val pixels =
             IntArray(pixelCount)
 
-        when (layout) {
+        if (layout == Layout.NCHW) {
 
-            Layout.NCHW -> {
+            val greenOffset =
+                pixelCount
 
-                for (i in 0 until pixelCount) {
+            val blueOffset =
+                pixelCount * 2
 
-                    val red =
-                        outputValueToByte(
-                            data[i]
-                        )
+            for (i in 0 until pixelCount) {
 
-                    val green =
-                        outputValueToByte(
-                            data[pixelCount + i]
-                        )
+                val red =
+                    outputValueToByte(
+                        data[i]
+                    )
 
-                    val blue =
-                        outputValueToByte(
-                            data[pixelCount * 2 + i]
-                        )
+                val green =
+                    outputValueToByte(
+                        data[greenOffset + i]
+                    )
 
-                    pixels[i] =
-                        argb(
-                            red,
-                            green,
-                            blue
-                        )
-                }
+                val blue =
+                    outputValueToByte(
+                        data[blueOffset + i]
+                    )
+
+                pixels[i] =
+                    argb(
+                        red,
+                        green,
+                        blue
+                    )
             }
 
-            Layout.NHWC -> {
+        } else {
 
-                for (i in 0 until pixelCount) {
+            var dataIndex = 0
 
-                    val base =
-                        i * 3
+            for (i in 0 until pixelCount) {
 
-                    val red =
-                        outputValueToByte(
-                            data[base]
-                        )
+                val red =
+                    outputValueToByte(
+                        data[dataIndex++]
+                    )
 
-                    val green =
-                        outputValueToByte(
-                            data[base + 1]
-                        )
+                val green =
+                    outputValueToByte(
+                        data[dataIndex++]
+                    )
 
-                    val blue =
-                        outputValueToByte(
-                            data[base + 2]
-                        )
+                val blue =
+                    outputValueToByte(
+                        data[dataIndex++]
+                    )
 
-                    pixels[i] =
-                        argb(
-                            red,
-                            green,
-                            blue
-                        )
-                }
+                pixels[i] =
+                    argb(
+                        red,
+                        green,
+                        blue
+                    )
             }
         }
 
@@ -531,19 +567,15 @@ class OnnxAnimeEngine(
     ): Layout {
 
         val expected =
-            width * height * 3
+            width *
+                height *
+                3
 
         require(dataSize >= expected) {
             "Unable to infer ONNX output layout. " +
                 "elements=$dataSize expectedAtLeast=$expected"
         }
 
-        /*
-         * AnimeGANv3's normal ONNX export is NCHW.
-         *
-         * If the output TensorInfo is unavailable,
-         * use NCHW rather than guessing from pixel values.
-         */
         return Layout.NCHW
     }
 
@@ -554,8 +586,7 @@ class OnnxAnimeEngine(
 
         require(shape.size == 4) {
             "Unsupported $tensorName tensor rank: " +
-                "${shape.size}. " +
-                "Expected rank 4."
+                "${shape.size}. Expected rank 4."
         }
 
         val channelFirst =
@@ -649,17 +680,20 @@ class OnnxAnimeEngine(
         value: Float
     ): Int {
 
-        /*
-         * AnimeGANv3 outputs RGB values in [-1, 1].
-         */
         val normalized =
             ((value + 1f) * 0.5f)
-                .coerceIn(0f, 1f)
+                .coerceIn(
+                    0f,
+                    1f
+                )
 
         return (
             normalized * 255f
         ).roundToInt()
-            .coerceIn(0, 255)
+            .coerceIn(
+                0,
+                255
+            )
     }
 
     private fun argb(
