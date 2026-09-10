@@ -6,15 +6,8 @@ import com.gptvideo2anime.inference.OnnxAnimeEngine
 import com.gptvideo2anime.model.ModelManager
 import java.io.File
 
-data class ProcessingInfo(
-    val inputUri: Uri,
-    val displayName: String,
-    val durationUs: Long,
-    val width: Int,
-    val height: Int,
-    val frameRate: Int,
-    val rotation: Int,
-    val outputPath: String
+data class ProcessResult(
+    val outputFile: File
 )
 
 class VideoProcessor(
@@ -24,97 +17,41 @@ class VideoProcessor(
     private val modelManager = ModelManager(context)
     private val codecEngine = MediaCodecVideoEngine(context)
 
-    fun process(
+    fun processVideo(
         uri: Uri,
-        strength: Float = 0.40f,
+        strength: Int,
         onProgress: (Int, Int, String) -> Unit
-    ): ProcessingInfo {
-
-        require(strength in 0f..1f) {
-            "Strength must be between 0 and 1."
-        }
-
-        onProgress(0, 100, "Inspecting video")
+    ): ProcessResult {
 
         val videoInfo = codecEngine.inspect(uri)
 
-        if (videoInfo.durationUs <= 0L) {
-            throw IllegalStateException("Unable to determine video duration.")
-        }
-
-        onProgress(1, 100, "Preparing AnimeGAN")
-
         val modelPath = modelManager.animeModelPath()
-            ?: throw IllegalStateException("AnimeGANv3 model is not available.")
+            ?: throw IllegalStateException("AnimeGAN model missing.")
 
-        val outputDirectory = File(context.filesDir, "output").apply {
-            mkdirs()
-        }
+        val outputDir = File(context.filesDir, "output").apply { mkdirs() }
 
         val outputFile = File(
-            outputDirectory,
+            outputDir,
             "anime_${System.currentTimeMillis()}.mp4"
         )
 
-        OnnxAnimeEngine(modelPath).use { animeEngine ->
+        OnnxAnimeEngine(modelPath).use { engine ->
 
             codecEngine.processVideo(
                 inputUri = uri,
                 outputFile = outputFile,
-                animeEngine = animeEngine,
-                strength = strength
-            ) { currentFrame, totalFrames, stage ->
+                animeEngine = engine,
+                strength = strength / 100f
+            ) { current, total, stage ->
 
-                val progress =
-                    if (totalFrames > 0) {
-                        ((currentFrame * 98) / totalFrames + 1)
-                            .coerceIn(1, 99)
-                    } else {
-                        1
-                    }
-
-                onProgress(progress, 100, stage)
+                onProgress(current, total, stage)
             }
         }
 
-        if (!outputFile.exists() || outputFile.length() == 0L) {
-            throw IllegalStateException(
-                "Video processing completed without creating an output file."
-            )
+        if (!outputFile.exists()) {
+            throw IllegalStateException("Output video missing.")
         }
 
-        onProgress(100, 100, "Complete")
-
-        return ProcessingInfo(
-            inputUri = uri,
-            displayName = outputFile.name,
-            durationUs = videoInfo.durationUs,
-            width = videoInfo.width,
-            height = videoInfo.height,
-            frameRate = videoInfo.frameRate,
-            rotation = videoInfo.rotationDegrees,
-            outputPath = outputFile.absolutePath
-        )
-    }
-
-    // Compatibility wrapper for MainActivity
-    data class ProcessResult(
-        val outputFile: File
-    )
-
-    fun processVideo(
-        uri: Uri,
-        strengthPercent: Int,
-        onProgress: (Long, Long, String) -> Unit
-    ): ProcessResult {
-
-        val info = process(
-            uri = uri,
-            strength = strengthPercent / 100f
-        ) { current, total, stage ->
-            onProgress(current.toLong(), total.toLong(), stage)
-        }
-
-        return ProcessResult(File(info.outputPath))
+        return ProcessResult(outputFile)
     }
 }
