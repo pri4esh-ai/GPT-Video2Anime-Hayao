@@ -17,10 +17,6 @@ data class ProcessingInfo(
     val outputPath: String
 )
 
-data class ProcessVideoResult(
-    val outputFile: File
-)
-
 class VideoProcessor(
     private val context: Context
 ) {
@@ -28,31 +24,10 @@ class VideoProcessor(
     private val modelManager = ModelManager(context)
     private val codecEngine = MediaCodecVideoEngine(context)
 
-    fun processVideo(
-        uri: Uri,
-        strength: Int,
-        onProgress: (current: Int, total: Int, stage: String) -> Unit
-    ): ProcessVideoResult {
-
-        val info = process(
-            uri = uri,
-            strength = strength / 100f,
-            onProgress = onProgress
-        )
-
-        return ProcessVideoResult(
-            outputFile = File(info.outputPath)
-        )
-    }
-
     fun process(
         uri: Uri,
         strength: Float = 0.40f,
-        onProgress: (
-            current: Int,
-            total: Int,
-            stage: String
-        ) -> Unit
+        onProgress: (Int, Int, String) -> Unit
     ): ProcessingInfo {
 
         require(strength in 0f..1f) {
@@ -64,29 +39,22 @@ class VideoProcessor(
         val videoInfo = codecEngine.inspect(uri)
 
         if (videoInfo.durationUs <= 0L) {
-            throw IllegalStateException(
-                "Unable to determine video duration."
-            )
+            throw IllegalStateException("Unable to determine video duration.")
         }
 
         onProgress(1, 100, "Preparing AnimeGAN")
 
-        val modelPath =
-            modelManager.animeModelPath()
-                ?: throw IllegalStateException(
-                    "AnimeGANv3 model is not available."
-                )
+        val modelPath = modelManager.animeModelPath()
+            ?: throw IllegalStateException("AnimeGANv3 model is not available.")
 
-        val outputDirectory =
-            File(context.filesDir, "output").apply {
-                mkdirs()
-            }
+        val outputDirectory = File(context.filesDir, "output").apply {
+            mkdirs()
+        }
 
-        val outputFile =
-            File(
-                outputDirectory,
-                "anime_${System.currentTimeMillis()}.mp4"
-            )
+        val outputFile = File(
+            outputDirectory,
+            "anime_${System.currentTimeMillis()}.mp4"
+        )
 
         OnnxAnimeEngine(modelPath).use { animeEngine ->
 
@@ -99,9 +67,8 @@ class VideoProcessor(
 
                 val progress =
                     if (totalFrames > 0) {
-                        (
-                            currentFrame.toLong() * 98L / totalFrames + 1L
-                        ).coerceIn(1L, 99L).toInt()
+                        ((currentFrame * 98) / totalFrames + 1)
+                            .coerceIn(1, 99)
                     } else {
                         1
                     }
@@ -128,5 +95,26 @@ class VideoProcessor(
             rotation = videoInfo.rotationDegrees,
             outputPath = outputFile.absolutePath
         )
+    }
+
+    // Compatibility wrapper for MainActivity
+    data class ProcessResult(
+        val outputFile: File
+    )
+
+    fun processVideo(
+        uri: Uri,
+        strengthPercent: Int,
+        onProgress: (Long, Long, String) -> Unit
+    ): ProcessResult {
+
+        val info = process(
+            uri = uri,
+            strength = strengthPercent / 100f
+        ) { current, total, stage ->
+            onProgress(current.toLong(), total.toLong(), stage)
+        }
+
+        return ProcessResult(File(info.outputPath))
     }
 }
