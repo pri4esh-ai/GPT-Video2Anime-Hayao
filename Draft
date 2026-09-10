@@ -129,3 +129,135 @@ class OnnxAnimeEngine(
                 Bitmap.Config.ARGB_8888
             )
     }
+fun processFrame(
+    frame: Bitmap
+): Bitmap {
+
+    require(!frame.isRecycled) {
+        "Input frame is recycled."
+    }
+
+    val resized =
+        if (
+            frame.width == modelWidth &&
+            frame.height == modelHeight
+        ) {
+            frame
+        } else {
+            Bitmap.createScaledBitmap(
+                frame,
+                modelWidth,
+                modelHeight,
+                true
+            )
+        }
+
+    val ownsResized =
+        resized !== frame
+
+    try {
+
+        updateInputTensor(resized)
+
+        session.run(
+            mapOf(inputName to inputTensor)
+        ).use { result ->
+
+            require(result.size() > 0) {
+                "ONNX model returned no output."
+            }
+
+            return outputToBitmap(
+                output = result[0].value,
+                outputWidth = frame.width,
+                outputHeight = frame.height
+            )
+        }
+
+    } finally {
+
+        if (
+            ownsResized &&
+            !resized.isRecycled
+        ) {
+            resized.recycle()
+        }
+    }
+}
+
+fun infer(
+    frame: Bitmap
+): Bitmap {
+    return processFrame(frame)
+}
+
+private fun updateInputTensor(
+    bitmap: Bitmap
+) {
+
+    bitmap.getPixels(
+        inputPixels,
+        0,
+        modelWidth,
+        0,
+        0,
+        modelWidth,
+        modelHeight
+    )
+
+    inputFloatBuffer.position(0)
+
+    if (inputLayout == Layout.NCHW) {
+
+        for (i in 0 until pixelCount) {
+            inputFloatBuffer.put(
+                i,
+                ((inputPixels[i] shr 16 and 255) / 127.5f) - 1f
+            )
+        }
+
+        val greenOffset =
+            pixelCount
+
+        for (i in 0 until pixelCount) {
+            inputFloatBuffer.put(
+                greenOffset + i,
+                ((inputPixels[i] shr 8 and 255) / 127.5f) - 1f
+            )
+        }
+
+        val blueOffset =
+            pixelCount * 2
+
+        for (i in 0 until pixelCount) {
+            inputFloatBuffer.put(
+                blueOffset + i,
+                ((inputPixels[i] and 255) / 127.5f) - 1f
+            )
+        }
+
+    } else {
+
+        var index = 0
+
+        for (pixel in inputPixels) {
+
+            inputFloatBuffer.put(
+                index++,
+                ((pixel shr 16 and 255) / 127.5f) - 1f
+            )
+
+            inputFloatBuffer.put(
+                index++,
+                ((pixel shr 8 and 255) / 127.5f) - 1f
+            )
+
+            inputFloatBuffer.put(
+                index++,
+                ((pixel and 255) / 127.5f) - 1f
+            )
+        }
+    }
+
+    inputFloatBuffer.position(0)
+}
