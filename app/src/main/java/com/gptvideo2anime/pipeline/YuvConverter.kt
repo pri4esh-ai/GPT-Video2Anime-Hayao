@@ -11,16 +11,6 @@ import kotlin.math.min
 
 object YuvConverter {
 
-    /**
-     * Converts Android YUV_420_888 Image to ARGB Bitmap.
-     *
-     * This conversion handles:
-     * - row stride
-     * - pixel stride
-     * - planar/semi-planar chroma layouts
-     *
-     * Output is an ordinary ARGB_8888 Bitmap.
-     */
     fun imageToBitmap(
         image: Image
     ): Bitmap {
@@ -52,20 +42,16 @@ object YuvConverter {
         val uvWidth = (width + 1) / 2
         val uvHeight = (height + 1) / 2
 
-        /*
-         * NV21 layout:
-         *
-         * YYYYYYYYY
-         * VUVUVUVUV
-         *
-         * Y plane first.
-         * Then VU interleaved.
-         *
-         * YuvImage understands NV21.
-         */
         val ySize = width * height
         val uvSize = uvWidth * uvHeight
 
+        /*
+         * YUV_420_888 -> NV21
+         *
+         * NV21:
+         * YYYYYYYY
+         * VUVUVUVU
+         */
         val nv21 = ByteArray(
             ySize + uvSize * 2
         )
@@ -157,35 +143,48 @@ object YuvConverter {
     }
 
     /**
-     * Converts Bitmap to YUV420 semi-planar NV12.
+     * Bitmap -> NV12.
      *
-     * IMPORTANT:
+     * COLOR_FormatYUV420SemiPlanar normally expects:
      *
-     * MediaCodec COLOR_FormatYUV420SemiPlanar
-     * generally expects:
-     *
-     * YYYYYYYYY
+     * YYYYYYYY
      * UVUVUVUV
      *
-     * NOT:
-     *
-     * YYYYYYYYY
-     * VUVUVUVU
-     *
-     * The old implementation emitted VU and could
-     * therefore produce blue/purple skin.
+     * The previous implementation produced VU,
+     * which can cause strongly blue/purple skin.
      */
     fun bitmapToYuv420(
         bitmap: Bitmap
     ): ByteArray {
 
-        val width =
-            (bitmap.width and -2)
-                .coerceAtLeast(2)
+        var width =
+            bitmap.width
 
-        val height =
-            (bitmap.height and -2)
-                .coerceAtLeast(2)
+        var height =
+            bitmap.height
+
+        /*
+         * H.264 YUV420 requires even dimensions.
+         */
+        width =
+            if (width % 2 == 0) {
+                width
+            } else {
+                width - 1
+            }
+
+        height =
+            if (height % 2 == 0) {
+                height
+            } else {
+                height - 1
+            }
+
+        width =
+            width.coerceAtLeast(2)
+
+        height =
+            height.coerceAtLeast(2)
 
         val argb =
             IntArray(
@@ -218,7 +217,7 @@ object YuvConverter {
          * NV12:
          *
          * Y plane
-         * UV interleaved plane
+         * UV plane
          */
         val output =
             ByteArray(
@@ -226,12 +225,13 @@ object YuvConverter {
                     chromaSize * 2
             )
 
+        /*
+         * -------------------------
+         * Y PLANE
+         * -------------------------
+         */
         var yIndex = 0
 
-        /*
-         * First pass:
-         * generate full-resolution Y.
-         */
         for (j in 0 until height) {
 
             for (i in 0 until width) {
@@ -251,11 +251,12 @@ object YuvConverter {
                     color and 0xFF
 
                 /*
-                 * BT.601 limited-range Y.
+                 * BT.601 limited range.
                  *
-                 * Y = 16 + 0.257R +
-                 *          0.504G +
-                 *          0.098B
+                 * Y = 16 +
+                 *     0.257R +
+                 *     0.504G +
+                 *     0.098B
                  */
                 val y =
                     (
@@ -267,25 +268,19 @@ object YuvConverter {
                     ) shr 8
 
                 output[yIndex++] =
-                    y
-                        .coerceIn(
-                            16,
-                            235
-                        )
-                        .toByte()
+                    y.coerceIn(
+                        16,
+                        235
+                    ).toByte()
             }
         }
 
         /*
-         * Second pass:
-         * generate 2x2 chroma blocks.
+         * -------------------------
+         * UV PLANE
+         * -------------------------
          *
-         * NV12 requires:
-         *
-         * U
-         * V
-         *
-         * in that exact order.
+         * 2x2 chroma subsampling.
          */
         var uvIndex =
             frameSize
@@ -296,8 +291,7 @@ object YuvConverter {
 
                 var sumU = 0
                 var sumV = 0
-
-                var samples = 0
+                var count = 0
 
                 for (dy in 0..1) {
 
@@ -330,7 +324,7 @@ object YuvConverter {
                             color and 0xFF
 
                         /*
-                         * BT.601 limited-range chroma.
+                         * BT.601 limited-range U.
                          */
                         val u =
                             (
@@ -341,6 +335,9 @@ object YuvConverter {
                                     128
                             ) shr 8
 
+                        /*
+                         * BT.601 limited-range V.
+                         */
                         val v =
                             (
                                 128 +
@@ -353,30 +350,30 @@ object YuvConverter {
                         sumU += u
                         sumV += v
 
-                        samples++
+                        count++
                     }
                 }
 
                 val u =
-                    (sumU / samples)
+                    (sumU / count)
                         .coerceIn(
                             16,
                             240
                         )
 
                 val v =
-                    (sumV / samples)
+                    (sumV / count)
                         .coerceIn(
                             16,
                             240
                         )
 
                 /*
-                 * CRITICAL:
+                 * IMPORTANT:
                  *
                  * NV12 = U V
                  *
-                 * NOT V U.
+                 * Do NOT change this to V U.
                  */
                 output[uvIndex++] =
                     u.toByte()
@@ -413,35 +410,59 @@ object YuvConverter {
             return bitmap
         }
 
-        val width =
+        /*
+         * Calculate dimensions first.
+         */
+        var width =
             (
-                bitmap.width *
-                    scale
-                )
+                bitmap.width * scale
+            )
                 .toInt()
                 .coerceAtLeast(2)
-                and -2
 
-        val height =
+        var height =
             (
-                bitmap.height *
-                    scale
-                )
+                bitmap.height * scale
+            )
                 .toInt()
                 .coerceAtLeast(2)
-                and -2
+
+        /*
+         * Force even dimensions.
+         *
+         * Kotlin does not support:
+         *
+         * value and -2
+         *
+         * in this context.
+         *
+         * So use modulo instead.
+         */
+        if (width % 2 != 0) {
+            width--
+        }
+
+        if (height % 2 != 0) {
+            height--
+        }
+
+        width =
+            width.coerceAtLeast(2)
+
+        height =
+            height.coerceAtLeast(2)
 
         return Bitmap.createScaledBitmap(
             bitmap,
-            width.coerceAtLeast(2),
-            height.coerceAtLeast(2),
+            width,
+            height,
             true
         )
     }
 
     fun bitmapToJpeg(
         bitmap: Bitmap,
-        quality: Int
+        quality: Int = 95
     ): ByteArray {
 
         val output =
