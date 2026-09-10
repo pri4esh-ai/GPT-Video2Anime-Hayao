@@ -39,7 +39,6 @@ class MediaCodecVideoEngine(
         private const val MAX_BITRATE = 20_000_000
         private const val SAMPLE_BUFFER_SIZE = 8 * 1024 * 1024
 
-        // Optimized inference size
         private const val MODEL_SIZE = 512
     }
 
@@ -53,8 +52,7 @@ class MediaCodecVideoEngine(
 
             val track = findVideoTrack(extractor)
 
-            if (track < 0)
-                throw IllegalStateException("No video track found.")
+            require(track >= 0)
 
             val format = extractor.getTrackFormat(track)
 
@@ -71,15 +69,14 @@ class MediaCodecVideoEngine(
                         format.getInteger(MediaFormat.KEY_FRAME_RATE)
                     else DEFAULT_FPS,
                 rotation =
-                    if (
-                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
-                        format.containsKey(MediaFormat.KEY_ROTATION)
-                    )
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                        format.containsKey(MediaFormat.KEY_ROTATION))
                         format.getInteger(MediaFormat.KEY_ROTATION)
                     else 0
             )
 
         } finally {
+
             extractor.release()
         }
     }
@@ -101,7 +98,7 @@ class MediaCodecVideoEngine(
         val tempVideo =
             File(
                 outputFile.parentFile,
-                "${outputFile.nameWithoutExtension}_video_only.mp4"
+                "video_${System.nanoTime()}.mp4"
             )
 
         try {
@@ -112,12 +109,11 @@ class MediaCodecVideoEngine(
 
             val videoTrack = findVideoTrack(extractor)
 
+            require(videoTrack >= 0)
+
             extractor.selectTrack(videoTrack)
 
             val format = extractor.getTrackFormat(videoTrack)
-
-            val mime =
-                format.getString(MediaFormat.KEY_MIME)!!
 
             val width =
                 makeEvenDimension(
@@ -140,28 +136,21 @@ class MediaCodecVideoEngine(
                 else 0L
 
             val rotation =
-                if (
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
-                    format.containsKey(MediaFormat.KEY_ROTATION)
-                )
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                    format.containsKey(MediaFormat.KEY_ROTATION))
                     format.getInteger(MediaFormat.KEY_ROTATION)
                 else 0
 
             decoder =
-                MediaCodec.createDecoderByType(mime)
+                MediaCodec.createDecoderByType(
+                    format.getString(MediaFormat.KEY_MIME)!!
+                )
 
             decoder.configure(format, null, null, 0)
-
             decoder.start()
 
-            val encoderInfo =
-                findH264Encoder()
-
-            val colorFormat =
-                chooseColorFormat(
-                    encoderInfo,
-                    OUTPUT_MIME
-                )!!
+            val encoderInfo = findH264Encoder()
+            val color = chooseColorFormat(encoderInfo, OUTPUT_MIME)!!
 
             val encoderFormat =
                 MediaFormat.createVideoFormat(
@@ -170,14 +159,19 @@ class MediaCodecVideoEngine(
                     height
                 ).apply {
 
-                    setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
-                    setInteger(MediaFormat.KEY_BIT_RATE, calculateBitRate(width, height, fps))
+                    setInteger(MediaFormat.KEY_COLOR_FORMAT, color)
                     setInteger(MediaFormat.KEY_FRAME_RATE, fps)
                     setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+                    setInteger(
+                        MediaFormat.KEY_BIT_RATE,
+                        calculateBitRate(width, height, fps)
+                    )
                 }
 
             encoder =
-                MediaCodec.createByCodecName(encoderInfo.name)
+                MediaCodec.createByCodecName(
+                    encoderInfo.name
+                )
 
             encoder.configure(
                 encoderFormat,
@@ -194,32 +188,33 @@ class MediaCodecVideoEngine(
                     MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
                 )
 
-            if (rotation != 0)
-                muxer.setOrientationHint(normalizeRotation(rotation))
+            if (rotation != 0) {
+                muxer.setOrientationHint(rotation)
+            }
 
             processFrames(
-                extractor = extractor,
-                decoder = decoder,
-                encoder = encoder,
-                muxer = muxer,
-                sourceWidth = width,
-                sourceHeight = height,
-                outputWidth = width,
-                outputHeight = height,
-                fps = fps,
-                durationUs = durationUs,
-                animeEngine = animeEngine,
-                strength = strength,
-                onProgress = onProgress
+                extractor,
+                decoder,
+                encoder,
+                muxer,
+                width,
+                height,
+                fps,
+                durationUs,
+                animeEngine,
+                strength,
+                onProgress
             )
 
             muxer.stop()
             muxer.release()
             muxer = null
 
-            muxAudio(inputUri, tempVideo, outputFile)
-
-            tempVideo.delete()
+            muxAudio(
+                inputUri,
+                tempVideo,
+                outputFile
+            )
 
         } finally {
 
@@ -228,599 +223,960 @@ class MediaCodecVideoEngine(
             try { encoder?.release() } catch (_: Exception) {}
             try { decoder?.stop() } catch (_: Exception) {}
             try { decoder?.release() } catch (_: Exception) {}
+
             extractor.release()
+
+            if (tempVideo.exists()) {
+                tempVideo.delete()
+            }
         }
     }
-        private fun processFrames(
-        extractor: MediaExtractor,
-        decoder: MediaCodec,
-        encoder: MediaCodec,
-        muxer: MediaMuxer,
-        sourceWidth: Int,
-        sourceHeight: Int,
-        outputWidth: Int,
-        outputHeight: Int,
-        fps: Int,
-        durationUs: Long,
-        animeEngine: OnnxAnimeEngine,
-        strength: Float,
-        onProgress: (Int, Int, String) -> Unit
-    ) {
+    private fun processFrames(
+    extractor: MediaExtractor,
+    decoder: MediaCodec,
+    encoder: MediaCodec,
+    muxer: MediaMuxer,
+    outputWidth: Int,
+    outputHeight: Int,
+    fps: Int,
+    durationUs: Long,
+    animeEngine: OnnxAnimeEngine,
+    strength: Float,
+    onProgress: (Int, Int, String) -> Unit
+) {
 
-        val encoderSink = EncoderSink(encoder, muxer)
-        val info = MediaCodec.BufferInfo()
+    val encoderSink = EncoderSink(
+        encoder = encoder,
+        muxer = muxer
+    )
 
-        var extractorDone = false
-        var decoderDone = false
-        var encoderEnded = false
+    val decoderInfo = MediaCodec.BufferInfo()
 
-        var processed = 0
-        val total = estimateFrameCount(durationUs, fps)
+    var extractorDone = false
+    var decoderDone = false
+    var encoderInputEnded = false
 
-        while (!encoderSink.isEndOfStream()) {
+    var processedFrames = 0
 
-            if (!extractorDone) {
+    val totalFrames =
+        estimateFrameCount(
+            durationUs,
+            fps
+        )
 
-                val input = decoder.dequeueInputBuffer(TIMEOUT_US)
+    while (!encoderSink.isEndOfStream()) {
 
-                if (input >= 0) {
+        if (!extractorDone) {
 
-                    val buffer = decoder.getInputBuffer(input)!!
-                    buffer.clear()
+            val inputIndex =
+                decoder.dequeueInputBuffer(TIMEOUT_US)
 
-                    val size = extractor.readSampleData(buffer, 0)
+            if (inputIndex >= 0) {
 
-                    if (size < 0) {
-
-                        decoder.queueInputBuffer(
-                            input,
-                            0,
-                            0,
-                            0,
-                            MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                val inputBuffer =
+                    decoder.getInputBuffer(inputIndex)
+                        ?: throw IllegalStateException(
+                            "Decoder input buffer unavailable."
                         )
 
-                        extractorDone = true
+                inputBuffer.clear()
 
-                    } else {
+                val sampleSize =
+                    extractor.readSampleData(
+                        inputBuffer,
+                        0
+                    )
 
-                        decoder.queueInputBuffer(
-                            input,
-                            0,
-                            size,
-                            extractor.sampleTime,
-                            extractor.sampleFlags
-                        )
+                if (sampleSize < 0) {
 
-                        extractor.advance()
-                    }
+                    decoder.queueInputBuffer(
+                        inputIndex,
+                        0,
+                        0,
+                        0L,
+                        MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                    )
+
+                    extractorDone = true
+
+                } else {
+
+                    decoder.queueInputBuffer(
+                        inputIndex,
+                        0,
+                        sampleSize,
+                        extractor.sampleTime.coerceAtLeast(0L),
+                        extractor.sampleFlags
+                    )
+
+                    extractor.advance()
                 }
             }
+        }
 
-            while (true) {
+        var decoderOutputAvailable = true
 
-                val output = decoder.dequeueOutputBuffer(info, 0)
+        while (decoderOutputAvailable) {
 
-                if (output == MediaCodec.INFO_TRY_AGAIN_LATER)
-                    break
+            val outputIndex =
+                decoder.dequeueOutputBuffer(
+                    decoderInfo,
+                    0
+                )
 
-                if (output == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED)
-                    continue
+            when {
 
-                if (output < 0)
-                    continue
+                outputIndex ==
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> {
 
-                val eos =
-                    info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                    decoderOutputAvailable = false
+                }
 
-                if (info.size > 0) {
+                outputIndex ==
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
 
-                    val image = decoder.getOutputImage(output)!!
-
-                    val bitmap = try {
-                        YuvConverter.imageToBitmap(image)
-                    } finally {
-                        image.close()
-                    }
-
-                    try {
-
-                        // Downscale once for AnimeGAN
-                        val inputBitmap =
-                            if (bitmap.width == MODEL_SIZE &&
-                                bitmap.height == MODEL_SIZE
-                            ) bitmap
-                            else Bitmap.createScaledBitmap(
-                                bitmap,
-                                MODEL_SIZE,
-                                MODEL_SIZE,
-                                true
-                            )
-
-                        val animeSmall =
-                            animeEngine.processFrame(inputBitmap)
-
-                        val animeFull =
-                            if (outputWidth == MODEL_SIZE &&
-                                outputHeight == MODEL_SIZE
-                            ) animeSmall
-                            else Bitmap.createScaledBitmap(
-                                animeSmall,
-                                outputWidth,
-                                outputHeight,
-                                true
-                            )
-
-                        val originalFull =
-                            if (bitmap.width == outputWidth &&
-                                bitmap.height == outputHeight
-                            ) bitmap
-                            else Bitmap.createScaledBitmap(
-                                bitmap,
-                                outputWidth,
-                                outputHeight,
-                                true
-                            )
-
-                        val finalBitmap =
-                            blendFrames(
-                                originalFull,
-                                animeFull,
-                                strength
-                            )
-
-                        val yuv =
-                            YuvConverter.bitmapToYuv420(finalBitmap)
-
-                        encoderSink.queueFrame(
-                            yuv,
-                            info.presentationTimeUs
-                        )
-
-                        if (inputBitmap !== bitmap)
-                            inputBitmap.recycle()
-
-                        if (animeSmall !== animeFull)
-                            animeSmall.recycle()
-
-                        animeFull.recycle()
-
-                        if (originalFull !== bitmap)
-                            originalFull.recycle()
-
-                        finalBitmap.recycle()
-
-                    } finally {
-                        bitmap.recycle()
-                    }
-
-                    processed++
-
-                    onProgress(
-                        processed,
-                        total,
-                        "Processing..."
+                    Log.i(
+                        TAG,
+                        "Decoder output format changed: ${decoder.outputFormat}"
                     )
                 }
 
-                decoder.releaseOutputBuffer(output, false)
+                outputIndex >= 0 -> {
 
-                if (eos) {
-                    decoderDone = true
-                    break
+                    val eos =
+                        (
+                            decoderInfo.flags and
+                                MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                            ) != 0
+
+                    if (decoderInfo.size > 0) {
+
+                        onProgress(
+                            processedFrames,
+                            totalFrames,
+                            "Processing..."
+                        )
+
+                        val image =
+                            decoder.getOutputImage(outputIndex)
+                                ?: throw IllegalStateException(
+                                    "Decoder Image unavailable."
+                                )
+
+                        val originalBitmap =
+                            try {
+                                YuvConverter.imageToBitmap(image)
+                            } finally {
+                                image.close()
+                            }
+
+                        try {
+
+                            val modelBitmap =
+                                YuvConverter.resize(
+                                    originalBitmap,
+                                    MODEL_SIZE,
+                                    MODEL_SIZE
+                                )
+
+                            try {
+
+                                val animeBitmap =
+                                    animeEngine.processFrame(modelBitmap)
+
+                                try {
+
+                                    val finalBitmap =
+                                        Bitmap.createScaledBitmap(
+                                            animeBitmap,
+                                            outputWidth,
+                                            outputHeight,
+                                            true
+                                        )
+
+                                    try {
+
+                                        val outputBitmap =
+                                            if (strength >= 0.999f) {
+
+                                                finalBitmap
+
+                                            } else {
+
+                                                blendFrames(
+                                                    originalBitmap =
+                                                        YuvConverter.resize(
+                                                            originalBitmap,
+                                                            outputWidth,
+                                                            outputHeight
+                                                        ),
+                                                    animeBitmap =
+                                                        finalBitmap,
+                                                    strength = strength
+                                                )
+                                            }
+
+                                        try {
+
+                                            val yuv =
+                                                YuvConverter.bitmapToYuv420(
+                                                    outputBitmap
+                                                )
+
+                                            encoderSink.queueFrame(
+                                                yuv,
+                                                decoderInfo.presentationTimeUs.coerceAtLeast(0L)
+                                            )
+
+                                        } finally {
+
+                                            if (
+                                                outputBitmap !== finalBitmap &&
+                                                !outputBitmap.isRecycled
+                                            ) {
+                                                outputBitmap.recycle()
+                                            }
+                                        }
+
+                                    } finally {
+
+                                        if (!finalBitmap.isRecycled) {
+                                            finalBitmap.recycle()
+                                        }
+                                    }
+
+                                } finally {
+
+                                    if (!animeBitmap.isRecycled) {
+                                        animeBitmap.recycle()
+                                    }
+                                }
+
+                            } finally {
+
+                                if (
+                                    modelBitmap !== originalBitmap &&
+                                    !modelBitmap.isRecycled
+                                ) {
+                                    modelBitmap.recycle()
+                                }
+                            }
+
+                            processedFrames++
+
+                            onProgress(
+                                processedFrames,
+                                totalFrames,
+                                "Encoding..."
+                            )
+
+                        } finally {
+
+                            if (!originalBitmap.isRecycled) {
+                                originalBitmap.recycle()
+                            }
+                        }
+                    }
+
+                    decoder.releaseOutputBuffer(
+                        outputIndex,
+                        false
+                    )
+
+                    if (eos) {
+
+                        decoderDone = true
+                        extractorDone = true
+
+                        break
+                    }
                 }
             }
+        }
 
-            if (decoderDone && !encoderEnded) {
-                encoderSink.signalEndOfInput()
-                encoderEnded = true
+        if (
+            decoderDone &&
+            !encoderInputEnded
+        ) {
+
+            encoderSink.signalEndOfInput()
+
+            encoderInputEnded = true
+        }
+
+        encoderSink.drain(0L)
+
+        if (
+            decoderDone &&
+            encoderInputEnded
+        ) {
+
+            encoderSink.drain(TIMEOUT_US)
+
+            if (!encoderSink.isEndOfStream()) {
+                Thread.yield()
             }
-
-            encoderSink.drain(0)
-        }
-
-        if (!encoderSink.isMuxerStarted()) {
-            throw IllegalStateException(
-                "Encoder never produced output."
-            )
         }
     }
 
+    if (!encoderSink.isMuxerStarted()) {
+        throw IllegalStateException(
+            "Encoder never produced an output format."
+        )
+    }
+
+    Log.i(
+        TAG,
+        "Processed frames=$processedFrames"
+    )
+}
     private fun blendFrames(
-        original: Bitmap,
-        anime: Bitmap,
-        strength: Float
-    ): Bitmap {
+    originalBitmap: Bitmap,
+    animeBitmap: Bitmap,
+    strength: Float
+): Bitmap {
 
-        val width = original.width
-        val height = original.height
-
-        val result =
-            Bitmap.createBitmap(
-                width,
-                height,
-                Bitmap.Config.ARGB_8888
-            )
-
-        val op = IntArray(width * height)
-        val ap = IntArray(width * height)
-        val rp = IntArray(width * height)
-
-        original.getPixels(op,0,width,0,0,width,height)
-        anime.getPixels(ap,0,width,0,0,width,height)
-
-        val inv = 1f - strength
-
-        for (i in rp.indices) {
-
-            val o = op[i]
-            val a = ap[i]
-
-            val r =
-                (((o shr 16 and 255) * inv) +
-                        ((a shr 16 and 255) * strength))
-                    .roundToInt()
-
-            val g =
-                (((o shr 8 and 255) * inv) +
-                        ((a shr 8 and 255) * strength))
-                    .roundToInt()
-
-            val b =
-                (((o and 255) * inv) +
-                        ((a and 255) * strength))
-                    .roundToInt()
-
-            rp[i] =
-                (255 shl 24) or
-                        (r.coerceIn(0,255) shl 16) or
-                        (g.coerceIn(0,255) shl 8) or
-                        b.coerceIn(0,255)
-        }
-
-        result.setPixels(rp,0,width,0,0,width,height)
-        return result
+    if (strength >= 0.999f) {
+        return animeBitmap.copy(Bitmap.Config.ARGB_8888, false)
     }
 
-    private fun muxAudio(
-        inputUri: Uri,
-        processedVideo: File,
-        outputFile: File
-    ) {
+    if (strength <= 0.001f) {
+        return originalBitmap.copy(Bitmap.Config.ARGB_8888, false)
+    }
 
-        val source = MediaExtractor()
-        val video = MediaExtractor()
-        var muxer: MediaMuxer? = null
+    val width = originalBitmap.width
+    val height = originalBitmap.height
+
+    val result =
+        Bitmap.createBitmap(
+            width,
+            height,
+            Bitmap.Config.ARGB_8888
+        )
+
+    val originalPixels = IntArray(width * height)
+    val animePixels = IntArray(width * height)
+
+    originalBitmap.getPixels(
+        originalPixels,
+        0,
+        width,
+        0,
+        0,
+        width,
+        height
+    )
+
+    animeBitmap.getPixels(
+        animePixels,
+        0,
+        width,
+        0,
+        0,
+        width,
+        height
+    )
+
+    val inverse = 1f - strength
+
+    for (i in originalPixels.indices) {
+
+        val a = originalPixels[i]
+        val b = animePixels[i]
+
+        val r =
+            (
+                ((a shr 16) and 255) * inverse +
+                    ((b shr 16) and 255) * strength
+                )
+                .roundToInt()
+
+        val g =
+            (
+                ((a shr 8) and 255) * inverse +
+                    ((b shr 8) and 255) * strength
+                )
+                .roundToInt()
+
+        val blue =
+            (
+                (a and 255) * inverse +
+                    (b and 255) * strength
+                )
+                .roundToInt()
+
+        originalPixels[i] =
+            (255 shl 24) or
+                (r shl 16) or
+                (g shl 8) or
+                blue
+    }
+
+    result.setPixels(
+        originalPixels,
+        0,
+        width,
+        0,
+        0,
+        width,
+        height
+    )
+
+    return result
+}
+
+private fun muxAudio(
+    inputUri: Uri,
+    processedVideo: File,
+    outputFile: File
+) {
+
+    val sourceExtractor = MediaExtractor()
+    val videoExtractor = MediaExtractor()
+    var muxer: MediaMuxer? = null
+
+    try {
+
+        setExtractorDataSource(sourceExtractor, inputUri)
+        setExtractorDataSource(videoExtractor, Uri.fromFile(processedVideo))
+
+        val videoTrack = findVideoTrack(videoExtractor)
+        val audioTrack = findAudioTrack(sourceExtractor)
+
+        if (audioTrack < 0) {
+
+            processedVideo.copyTo(
+                outputFile,
+                overwrite = true
+            )
+
+            return
+        }
+
+        videoExtractor.selectTrack(videoTrack)
+        sourceExtractor.selectTrack(audioTrack)
+
+        muxer =
+            MediaMuxer(
+                outputFile.absolutePath,
+                MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+            )
+
+        val outVideo =
+            muxer.addTrack(
+                videoExtractor.getTrackFormat(videoTrack)
+            )
+
+        val outAudio =
+            muxer.addTrack(
+                sourceExtractor.getTrackFormat(audioTrack)
+            )
+
+        muxer.start()
+
+        copySamples(
+            videoExtractor,
+            muxer,
+            outVideo
+        )
+
+        copySamples(
+            sourceExtractor,
+            muxer,
+            outAudio
+        )
+
+        muxer.stop()
+
+    } finally {
 
         try {
+            muxer?.release()
+        } catch (_: Exception) {
+        }
 
-            setExtractorDataSource(source,inputUri)
-            setExtractorDataSource(video,Uri.fromFile(processedVideo))
+        sourceExtractor.release()
+        videoExtractor.release()
+    }
+}
 
-            val videoTrack = findVideoTrack(video)
-            val audioTrack = findAudioTrack(source)
+private fun copySamples(
+    extractor: MediaExtractor,
+    muxer: MediaMuxer,
+    outputTrack: Int
+) {
 
-            if (audioTrack < 0) {
+    val buffer =
+        ByteBuffer.allocateDirect(
+            determineSampleBufferSize(extractor)
+        )
 
-                processedVideo.copyTo(
-                    outputFile,
-                    overwrite = true
+    val info =
+        MediaCodec.BufferInfo()
+
+    while (true) {
+
+        buffer.clear()
+
+        val size =
+            extractor.readSampleData(
+                buffer,
+                0
+            )
+
+        if (size < 0) break
+
+        info.set(
+            0,
+            size,
+            extractor.sampleTime,
+            extractor.sampleFlags
+        )
+
+        muxer.writeSampleData(
+            outputTrack,
+            buffer,
+            info
+        )
+
+        extractor.advance()
+    }
+}
+
+private fun determineSampleBufferSize(
+    extractor: MediaExtractor
+): Int {
+
+    val track =
+        findCurrentTrack(extractor)
+
+    if (track >= 0) {
+
+        val format =
+            extractor.getTrackFormat(track)
+
+        if (
+            format.containsKey(
+                MediaFormat.KEY_MAX_INPUT_SIZE
+            )
+        ) {
+
+            return max(
+                format.getInteger(
+                    MediaFormat.KEY_MAX_INPUT_SIZE
+                ),
+                1024 * 1024
+            )
+        }
+    }
+
+    return SAMPLE_BUFFER_SIZE
+}
+
+private fun findCurrentTrack(
+    extractor: MediaExtractor
+): Int {
+
+    for (i in 0 until extractor.trackCount) {
+
+        val mime =
+            extractor.getTrackFormat(i)
+                .getString(MediaFormat.KEY_MIME)
+                ?: continue
+
+        if (
+            mime.startsWith("video/") ||
+            mime.startsWith("audio/")
+        ) {
+            return i
+        }
+    }
+
+    return -1
+}
+
+private fun findVideoTrack(
+    extractor: MediaExtractor
+): Int {
+
+    for (i in 0 until extractor.trackCount) {
+
+        val mime =
+            extractor.getTrackFormat(i)
+                .getString(MediaFormat.KEY_MIME)
+                ?: continue
+
+        if (mime.startsWith("video/")) {
+            return i
+        }
+    }
+
+    return -1
+}
+
+private fun findAudioTrack(
+    extractor: MediaExtractor
+): Int {
+
+    for (i in 0 until extractor.trackCount) {
+
+        val mime =
+            extractor.getTrackFormat(i)
+                .getString(MediaFormat.KEY_MIME)
+                ?: continue
+
+        if (mime.startsWith("audio/")) {
+            return i
+        }
+    }
+
+    return -1
+}
+private fun findH264Encoder(): MediaCodecInfo {
+
+    val codecList =
+        MediaCodecList(MediaCodecList.REGULAR_CODECS)
+
+    for (info in codecList.codecInfos) {
+
+        if (!info.isEncoder) {
+            continue
+        }
+
+        val types =
+            info.supportedTypes
+
+        if (
+            types.any {
+                it.equals(
+                    OUTPUT_MIME,
+                    ignoreCase = true
+                )
+            }
+        ) {
+
+            if (
+                chooseColorFormat(
+                    info,
+                    OUTPUT_MIME
+                ) != null
+            ) {
+                return info
+            }
+        }
+    }
+
+    throw IllegalStateException(
+        "No H.264 encoder with COLOR_FormatYUV420SemiPlanar was found."
+    )
+}
+
+private fun chooseColorFormat(
+    info: MediaCodecInfo,
+    mime: String
+): Int? {
+
+    val capabilities =
+        try {
+            info.getCapabilitiesForType(mime)
+        } catch (_: Exception) {
+            return null
+        }
+
+    for (format in capabilities.colorFormats) {
+        if (
+            format ==
+            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
+        ) {
+            return format
+        }
+    }
+
+    return null
+}
+
+private fun calculateBitRate(
+    width: Int,
+    height: Int,
+    fps: Int
+): Int {
+
+    val pixelsPerSecond =
+        width.toLong() *
+            height.toLong() *
+            fps.toLong()
+
+    val calculated =
+        (pixelsPerSecond * 0.12)
+            .roundToInt()
+
+    return calculated.coerceIn(
+        MIN_BITRATE,
+        MAX_BITRATE
+    )
+}
+
+private fun estimateFrameCount(
+    durationUs: Long,
+    fps: Int
+): Int {
+
+    if (durationUs <= 0L) {
+        return 1
+    }
+
+    val frames =
+        (
+            durationUs.toDouble() /
+                1_000_000.0 *
+                fps.toDouble()
+            )
+            .roundToInt()
+
+    return frames.coerceAtLeast(1)
+}
+
+private fun makeEvenDimension(
+    value: Int
+): Int {
+
+    return if (value % 2 == 0) value else value - 1
+}
+
+private fun outputEvenDimension(
+    value: Int
+): Int {
+
+    return makeEvenDimension(
+        value.coerceAtLeast(2)
+    )
+}
+
+private fun normalizeRotation(
+    rotation: Int
+): Int {
+
+    var value = rotation % 360
+
+    if (value < 0) value += 360
+
+    return when (value) {
+        90 -> 90
+        180 -> 180
+        270 -> 270
+        else -> 0
+    }
+}
+
+private fun setExtractorDataSource(
+    extractor: MediaExtractor,
+    uri: Uri
+) {
+
+    if (
+        uri.scheme.equals(
+            "file",
+            ignoreCase = true
+        )
+    ) {
+
+        extractor.setDataSource(
+            uri.path
+                ?: throw IllegalStateException(
+                    "Invalid file URI."
+                )
+        )
+
+    } else {
+
+        context.contentResolver.openFileDescriptor(
+            uri,
+            "r"
+        )?.use {
+
+            extractor.setDataSource(
+                it.fileDescriptor
+            )
+
+        } ?: throw IllegalStateException(
+            "Unable to open selected video."
+        )
+    }
+}
+
+private class EncoderSink(
+    private val encoder: MediaCodec,
+    private val muxer: MediaMuxer
+) {
+
+    private val bufferInfo =
+        MediaCodec.BufferInfo()
+
+    private var muxerStarted =
+        false
+
+    private var videoTrack =
+        -1
+
+    private var endOfStream =
+        false
+
+    fun queueFrame(
+        data: ByteArray,
+        presentationTimeUs: Long
+    ) {
+
+        while (true) {
+
+            val index =
+                encoder.dequeueInputBuffer(TIMEOUT_US)
+
+            if (index >= 0) {
+
+                val buffer =
+                    encoder.getInputBuffer(index)
+                        ?: throw IllegalStateException(
+                            "Encoder input buffer unavailable."
+                        )
+
+                buffer.clear()
+                buffer.put(data)
+
+                encoder.queueInputBuffer(
+                    index,
+                    0,
+                    data.size,
+                    presentationTimeUs,
+                    0
+                )
+
+                break
+            }
+
+            drain(TIMEOUT_US)
+        }
+
+        drain(0)
+    }
+
+    fun signalEndOfInput() {
+
+        while (true) {
+
+            val index =
+                encoder.dequeueInputBuffer(TIMEOUT_US)
+
+            if (index >= 0) {
+
+                encoder.queueInputBuffer(
+                    index,
+                    0,
+                    0,
+                    0,
+                    MediaCodec.BUFFER_FLAG_END_OF_STREAM
                 )
 
                 return
             }
 
-            video.selectTrack(videoTrack)
-            source.selectTrack(audioTrack)
+            drain(TIMEOUT_US)
+        }
+    }
 
-            muxer =
-                MediaMuxer(
-                    outputFile.absolutePath,
-                    MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+    fun drain(timeoutUs: Long) {
+
+        var timeout =
+            timeoutUs
+
+        while (!endOfStream) {
+
+            val index =
+                encoder.dequeueOutputBuffer(
+                    bufferInfo,
+                    timeout
                 )
 
-            val outVideo =
-                muxer.addTrack(video.getTrackFormat(videoTrack))
+            timeout = 0
 
-            val outAudio =
-                muxer.addTrack(source.getTrackFormat(audioTrack))
+            when (index) {
 
-            muxer.start()
+                MediaCodec.INFO_TRY_AGAIN_LATER -> return
 
-            copySamples(video,muxer,outVideo)
-            copySamples(source,muxer,outAudio)
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
 
-            muxer.stop()
-
-        } finally {
-
-            try { muxer?.release() } catch (_: Exception) {}
-            source.release()
-            video.release()
-        }
-    }
-
-    private fun copySamples(
-        extractor: MediaExtractor,
-        muxer: MediaMuxer,
-        outputTrack: Int
-    ) {
-
-        val buffer =
-            ByteBuffer.allocateDirect(SAMPLE_BUFFER_SIZE)
-
-        val info = MediaCodec.BufferInfo()
-
-        while (true) {
-
-            buffer.clear()
-
-            val size =
-                extractor.readSampleData(buffer,0)
-
-            if (size < 0) break
-
-            info.set(
-                0,
-                size,
-                extractor.sampleTime,
-                extractor.sampleFlags
-            )
-
-            muxer.writeSampleData(
-                outputTrack,
-                buffer,
-                info
-            )
-
-            extractor.advance()
-        }
-    }
-
-    private fun findVideoTrack(extractor: MediaExtractor): Int {
-
-        for (i in 0 until extractor.trackCount) {
-
-            val mime =
-                extractor.getTrackFormat(i)
-                    .getString(MediaFormat.KEY_MIME)
-
-            if (mime?.startsWith("video/") == true)
-                return i
-        }
-
-        return -1
-    }
-
-    private fun findAudioTrack(extractor: MediaExtractor): Int {
-
-        for (i in 0 until extractor.trackCount) {
-
-            val mime =
-                extractor.getTrackFormat(i)
-                    .getString(MediaFormat.KEY_MIME)
-
-            if (mime?.startsWith("audio/") == true)
-                return i
-        }
-
-        return -1
-    }
-
-    private fun findH264Encoder(): MediaCodecInfo {
-
-        return MediaCodecList(
-            MediaCodecList.REGULAR_CODECS
-        ).codecInfos.first {
-
-            it.isEncoder &&
-                    it.supportedTypes.any {
-                        type ->
-                        type.equals(
-                            OUTPUT_MIME,
-                            true
+                    if (muxerStarted) {
+                        throw IllegalStateException(
+                            "Encoder output format changed twice."
                         )
                     }
-        }
-    }
 
-    private fun chooseColorFormat(
-        info: MediaCodecInfo,
-        mime: String
-    ): Int? {
+                    videoTrack =
+                        muxer.addTrack(
+                            encoder.outputFormat
+                        )
 
-        return info.getCapabilitiesForType(mime)
-            .colorFormats.firstOrNull {
+                    muxer.start()
 
-                it ==
-                        MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
-            }
-    }
-
-    private fun calculateBitRate(
-        width: Int,
-        height: Int,
-        fps: Int
-    ): Int {
-
-        return (
-                width.toLong() *
-                        height *
-                        fps *
-                        0.12
-                )
-            .roundToInt()
-            .coerceIn(
-                MIN_BITRATE,
-                MAX_BITRATE
-            )
-    }
-
-    private fun estimateFrameCount(
-        durationUs: Long,
-        fps: Int
-    ): Int {
-
-        if (durationUs <= 0L) return 1
-
-        return (
-                durationUs / 1_000_000.0 * fps
-                )
-            .roundToInt()
-            .coerceAtLeast(1)
-    }
-
-    private fun makeEvenDimension(v: Int): Int =
-        if (v % 2 == 0) v else v - 1
-
-    private fun normalizeRotation(r: Int): Int =
-        ((r % 360) + 360) % 360
-
-    private fun setExtractorDataSource(
-        extractor: MediaExtractor,
-        uri: Uri
-    ) {
-
-        if (uri.scheme == "file") {
-
-            extractor.setDataSource(uri.path!!)
-
-        } else {
-
-            context.contentResolver
-                .openFileDescriptor(uri,"r")
-                .use {
-
-                    extractor.setDataSource(
-                        it!!.fileDescriptor
-                    )
-                }
-        }
-    }
-
-    private class EncoderSink(
-        private val encoder: MediaCodec,
-        private val muxer: MediaMuxer
-    ) {
-
-        private val info =
-            MediaCodec.BufferInfo()
-
-        private var started = false
-        private var track = -1
-        private var eos = false
-
-        fun queueFrame(
-            data: ByteArray,
-            pts: Long
-        ) {
-
-            while (true) {
-
-                val input =
-                    encoder.dequeueInputBuffer(TIMEOUT_US)
-
-                if (input >= 0) {
-
-                    val buffer =
-                        encoder.getInputBuffer(input)!!
-
-                    buffer.clear()
-                    buffer.put(data)
-
-                    encoder.queueInputBuffer(
-                        input,
-                        0,
-                        data.size,
-                        pts,
-                        0
-                    )
-
-                    return
+                    muxerStarted = true
                 }
 
-                drain(0)
-            }
-        }
+                MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
 
-        fun signalEndOfInput() {
+                else -> {
 
-            while (true) {
+                    if (index >= 0) {
 
-                val input =
-                    encoder.dequeueInputBuffer(TIMEOUT_US)
+                        encoder.getOutputBuffer(index)?.let {
 
-                if (input >= 0) {
-
-                    encoder.queueInputBuffer(
-                        input,
-                        0,
-                        0,
-                        0,
-                        MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                    )
-
-                    return
-                }
-
-                drain(0)
-            }
-        }
-
-        fun drain(timeout: Long) {
-
-            while (!eos) {
-
-                val output =
-                    encoder.dequeueOutputBuffer(info,timeout)
-
-                when {
-
-                    output == MediaCodec.INFO_TRY_AGAIN_LATER -> return
-
-                    output == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-
-                        track =
-                            muxer.addTrack(
-                                encoder.outputFormat
-                            )
-
-                        muxer.start()
-                        started = true
-                    }
-
-                    output >= 0 -> {
-
-                        val buffer =
-                            encoder.getOutputBuffer(output)
-
-                        if (
-                            buffer != null &&
-                            info.size > 0 &&
-                            started &&
-                            (
-                                info.flags and
+                            if (
+                                bufferInfo.size > 0 &&
+                                muxerStarted &&
+                                (
+                                    bufferInfo.flags and
                                         MediaCodec.BUFFER_FLAG_CODEC_CONFIG
-                                ) == 0
-                        ) {
+                                    ) == 0
+                            ) {
 
-                            buffer.position(info.offset)
-                            buffer.limit(info.offset + info.size)
+                                it.position(bufferInfo.offset)
 
-                            muxer.writeSampleData(track,buffer,info)
+                                it.limit(
+                                    bufferInfo.offset +
+                                        bufferInfo.size
+                                )
+
+                                muxer.writeSampleData(
+                                    videoTrack,
+                                    it,
+                                    bufferInfo
+                                )
+                            }
                         }
 
-                        eos =
-                            info.flags and
-                                    MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                        val eos =
+                            (
+                                bufferInfo.flags and
+                                    MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                                ) != 0
 
-                        encoder.releaseOutputBuffer(output,false)
+                        encoder.releaseOutputBuffer(
+                            index,
+                            false
+                        )
+
+                        if (eos) {
+                            endOfStream = true
+                            return
+                        }
                     }
                 }
             }
         }
-
-        fun isEndOfStream() = eos
-        fun isMuxerStarted() = started
     }
+
+    fun isEndOfStream() =
+        endOfStream
+
+    fun isMuxerStarted() =
+        muxerStarted
+}
 }
