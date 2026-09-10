@@ -10,10 +10,23 @@ import kotlin.math.roundToInt
 
 object YuvConverter {
 
+    /*
+     * Optimized YUV_420_888 -> Bitmap conversion.
+     *
+     * Main optimizations:
+     * - Integer YUV -> RGB math instead of Float math.
+     * - Direct ByteBuffer absolute reads.
+     * - Chroma values are calculated once per 2x2 block.
+     * - Avoids repeated Kotlin floating-point operations.
+     */
+
     fun imageToBitmap(
         image: Image
     ): Bitmap {
-        require(image.format == android.graphics.ImageFormat.YUV_420_888) {
+
+        require(
+            image.format == android.graphics.ImageFormat.YUV_420_888
+        ) {
             "Unsupported image format: ${image.format}"
         }
 
@@ -39,76 +52,151 @@ object YuvConverter {
 
         val output = IntArray(width * height)
 
-        for (y in 0 until height) {
-            val yRowOffset = y * yRowStride
+        /*
+         * Process two rows together.
+         *
+         * U/V are shared by a 2x2 Y block in YUV 4:2:0,
+         * so we only read chroma once for four pixels.
+         */
+        var y = 0
 
-            for (x in 0 until width) {
-                val yIndex =
-                    yRowOffset + x * yPixelStride
+        while (y < height) {
 
-                val chromaX = x shr 1
-                val chromaY = y shr 1
+            val yRow0 = y * yRowStride
+
+            val chromaY = y shr 1
+
+            val uRow =
+                chromaY * uRowStride
+
+            val vRow =
+                chromaY * vRowStride
+
+            val row0Output =
+                y * width
+
+            val hasSecondRow =
+                y + 1 < height
+
+            val yRow1 =
+                if (hasSecondRow) {
+                    (y + 1) * yRowStride
+                } else {
+                    0
+                }
+
+            val row1Output =
+                row0Output + width
+
+            var x = 0
+
+            while (x < width) {
+
+                val chromaX =
+                    x shr 1
 
                 val uIndex =
-                    chromaY * uRowStride +
+                    uRow +
                         chromaX * uPixelStride
 
                 val vIndex =
-                    chromaY * vRowStride +
+                    vRow +
                         chromaX * vPixelStride
 
-                val yValue =
-                    yBuffer.get(
-                        yIndex
-                    ).toInt() and 0xff
+                val u =
+                    (uBuffer.get(uIndex).toInt() and 0xff) - 128
 
-                val uValue =
-                    uBuffer.get(
-                        uIndex
-                    ).toInt() and 0xff
+                val v =
+                    (vBuffer.get(vIndex).toInt() and 0xff) - 128
 
-                val vValue =
-                    vBuffer.get(
-                        vIndex
-                    ).toInt() and 0xff
+                /*
+                 * Fixed-point approximation:
+                 *
+                 * R = Y + 1.402V
+                 * G = Y - 0.344U - 0.714V
+                 * B = Y + 1.772U
+                 */
+                val rOffset =
+                    (359 * v) shr 8
 
-                val r =
-                    (
-                        yValue +
-                            1.402f *
-                            (vValue - 128)
+                val gOffset =
+                    (-88 * u - 183 * v) shr 8
+
+                val bOffset =
+                    (454 * u) shr 8
+
+                val x1 =
+                    x + 1
+
+                val yIndex0 =
+                    yRow0 +
+                        x * yPixelStride
+
+                val yValue0 =
+                    yBuffer.get(yIndex0).toInt() and 0xff
+
+                output[row0Output + x] =
+                    rgbToArgb(
+                        yValue0 + rOffset,
+                        yValue0 + gOffset,
+                        yValue0 + bOffset
                     )
-                        .roundToInt()
-                        .coerceIn(0, 255)
 
-                val g =
-                    (
-                        yValue -
-                            0.344136f *
-                            (uValue - 128) -
-                            0.714136f *
-                            (vValue - 128)
-                    )
-                        .roundToInt()
-                        .coerceIn(0, 255)
+                if (x1 < width) {
 
-                val b =
-                    (
-                        yValue +
-                            1.772f *
-                            (uValue - 128)
-                    )
-                        .roundToInt()
-                        .coerceIn(0, 255)
+                    val yIndex1 =
+                        yRow0 +
+                            x1 * yPixelStride
 
-                output[
-                    y * width + x
-                ] =
-                    (0xff shl 24) or
-                        (r shl 16) or
-                        (g shl 8) or
-                        b
+                    val yValue1 =
+                        yBuffer.get(yIndex1).toInt() and 0xff
+
+                    output[row0Output + x1] =
+                        rgbToArgb(
+                            yValue1 + rOffset,
+                            yValue1 + gOffset,
+                            yValue1 + bOffset
+                        )
+                }
+
+                if (hasSecondRow) {
+
+                    val yValue2 =
+                        yBuffer.get(
+                            yRow1 +
+                                x * yPixelStride
+                        )
+                            .toInt() and 0xff
+
+                    output[row1Output + x] =
+                        rgbToArgb(
+                            yValue2 + rOffset,
+                            yValue2 + gOffset,
+                            yValue2 + bOffset
+                        )
+
+                    if (x1 < width) {
+
+                        val yValue3 =
+                            yBuffer.get(
+                                yRow1 +
+                                    x1 * yPixelStride
+                            )
+                                .toInt() and 0xff
+
+                        output[row1Output + x1] =
+                            rgbToArgb(
+                                yValue3 + rOffset,
+                                yValue3 + gOffset,
+                                yValue3 + bOffset
+                            )
+                    }
+                }
+
+                x += 2
             }
+
+            y += 2
         }
 
         return Bitmap.createBitmap(
@@ -119,21 +207,39 @@ object YuvConverter {
         )
     }
 
+    /*
+     * Bitmap -> YUV420 semi-planar.
+     *
+     * Layout:
+     *
+     * YYYYYYYY...
+     * UVUVUVUV...
+     *
+     * This matches the COLOR_FormatYUV420SemiPlanar path
+     * used by the current MediaCodec encoder.
+     */
     fun bitmapToYuv420(
         bitmap: Bitmap
     ): ByteArray {
+
         val width =
             bitmap.width and -2
 
         val height =
             bitmap.height and -2
 
-        require(width > 0 && height > 0) {
+        require(
+            width > 0 &&
+                height > 0
+        ) {
             "Bitmap must be at least 2x2 pixels."
         }
 
+        val pixelCount =
+            width * height
+
         val pixels =
-            IntArray(width * height)
+            IntArray(pixelCount)
 
         bitmap.getPixels(
             pixels,
@@ -146,10 +252,10 @@ object YuvConverter {
         )
 
         val ySize =
-            width * height
+            pixelCount
 
         val uvSize =
-            ySize / 2
+            pixelCount / 2
 
         val output =
             ByteArray(
@@ -159,12 +265,19 @@ object YuvConverter {
         var yIndex = 0
         var uvIndex = ySize
 
-        for (y in 0 until height) {
-            for (x in 0 until width) {
+        var y = 0
+
+        while (y < height) {
+
+            val row =
+                y * width
+
+            var x = 0
+
+            while (x < width) {
+
                 val pixel =
-                    pixels[
-                        y * width + x
-                    ]
+                    pixels[row + x]
 
                 val r =
                     (pixel shr 16) and 0xff
@@ -175,52 +288,126 @@ object YuvConverter {
                 val b =
                     pixel and 0xff
 
+                /*
+                 * Integer approximation:
+                 *
+                 * Y = 0.299R + 0.587G + 0.114B
+                 *
+                 * Avoid floating point in the hottest loop.
+                 */
                 val yValue =
                     (
-                        0.299f * r +
-                            0.587f * g +
-                            0.114f * b
-                    )
-                        .roundToInt()
-                        .coerceIn(0, 255)
+                        77 * r +
+                            150 * g +
+                            29 * b +
+                            128
+                        ) shr 8
 
                 output[yIndex++] =
-                    yValue.toByte()
+                    yValue
+                        .coerceIn(0, 255)
+                        .toByte()
 
+                /*
+                 * U/V are generated once per 2x2 block.
+                 *
+                 * We use the top-left pixel here to preserve
+                 * the behavior of the original converter while
+                 * reducing the amount of work substantially.
+                 */
                 if (
-                    y % 2 == 0 &&
-                    x % 2 == 0
+                    (y and 1) == 0 &&
+                    (x and 1) == 0
                 ) {
+
                     val uValue =
                         (
-                            -0.169f * r -
-                                0.331f * g +
-                                0.500f * b +
-                                128f
-                        )
-                            .roundToInt()
-                            .coerceIn(0, 255)
+                            -43 * r -
+                                85 * g +
+                                128 * b +
+                                (128 shl 8)
+                            ) shr 8
 
                     val vValue =
                         (
-                            0.500f * r -
-                                0.419f * g -
-                                0.081f * b +
-                                128f
-                        )
-                            .roundToInt()
+                            128 * r -
+                                107 * g -
+                                21 * b +
+                                (128 shl 8)
+                            ) shr 8
+
+                    output[uvIndex++] =
+                        uValue
                             .coerceIn(0, 255)
+                            .toByte()
 
                     output[uvIndex++] =
-                        uValue.toByte()
-
-                    output[uvIndex++] =
-                        vValue.toByte()
+                        vValue
+                            .coerceIn(0, 255)
+                            .toByte()
                 }
+
+                /*
+                 * Process second pixel of the pair.
+                 */
+                if (x + 1 < width) {
+
+                    val pixel2 =
+                        pixels[row + x + 1]
+
+                    val r2 =
+                        (pixel2 shr 16) and 0xff
+
+                    val g2 =
+                        (pixel2 shr 8) and 0xff
+
+                    val b2 =
+                        pixel2 and 0xff
+
+                    val yValue2 =
+                        (
+                            77 * r2 +
+                                150 * g2 +
+                                29 * b2 +
+                                128
+                            ) shr 8
+
+                    output[yIndex++] =
+                        yValue2
+                            .coerceIn(0, 255)
+                            .toByte()
+                }
+
+                x += 2
             }
+
+            y += 1
         }
 
         return output
+    }
+
+    private fun rgbToArgb(
+        r: Int,
+        g: Int,
+        b: Int
+    ): Int {
+
+        val red =
+            r.coerceIn(0, 255)
+
+        val green =
+            g.coerceIn(0, 255)
+
+        val blue =
+            b.coerceIn(0, 255)
+
+        return (
+            (0xff shl 24) or
+                (red shl 16) or
+                (green shl 8) or
+                blue
+            )
     }
 
     fun resize(
@@ -228,6 +415,7 @@ object YuvConverter {
         width: Int,
         height: Int
     ): Bitmap {
+
         if (
             bitmap.width == width &&
             bitmap.height == height
@@ -247,6 +435,7 @@ object YuvConverter {
         bitmap: Bitmap,
         quality: Int = 90
     ): ByteArray {
+
         val stream =
             ByteArrayOutputStream()
 
@@ -262,6 +451,7 @@ object YuvConverter {
     fun jpegToBitmap(
         data: ByteArray
     ): Bitmap {
+
         return BitmapFactory.decodeByteArray(
             data,
             0,
