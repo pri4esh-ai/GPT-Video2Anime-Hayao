@@ -4,25 +4,13 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -30,23 +18,8 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.VideoFile
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -78,10 +51,7 @@ private val Green = Color(0xFF65D88A)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        setContent {
-            Video2AnimeApp()
-        }
+        setContent { Video2AnimeApp() }
     }
 }
 
@@ -90,72 +60,41 @@ private fun Video2AnimeApp() {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
 
-    val modelManager = remember {
-        ModelManager(context)
-    }
+    val modelManager = remember { ModelManager(context) }
+    val videoProcessor = remember { VideoProcessor(context) }
 
-    val videoProcessor = remember {
-        VideoProcessor(context)
-    }
+    var selectedVideo by remember { mutableStateOf<Uri?>(null) }
+    var resultVideo by remember { mutableStateOf<Uri?>(null) }
+    var strength by remember { mutableIntStateOf(40) }
+    var progress by remember { mutableFloatStateOf(0f) }
+    var processing by remember { mutableStateOf(false) }
+    var modelReady by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf("Choose a video to begin") }
+    var error by remember { mutableStateOf<String?>(null) }
 
-    var selectedVideo by remember {
-        mutableStateOf<Uri?>(null)
-    }
-
-    var resultVideo by remember {
-        mutableStateOf<Uri?>(null)
-    }
-
-    var strength by remember {
-        mutableIntStateOf(40)
-    }
-
-    var progress by remember {
-        mutableFloatStateOf(0f)
-    }
-
-    var processing by remember {
-        mutableStateOf(false)
-    }
-
-    var modelReady by remember {
-        mutableStateOf(false)
-    }
-
-    var status by remember {
-        mutableStateOf("Choose a video to begin")
-    }
-
-    var error by remember {
-        mutableStateOf<String?>(null)
-    }
-
-    val picker =
-        rememberLauncherForActivityResult(
-            ActivityResultContracts.GetContent()
-        ) { uri ->
-
-            if (uri == null) return@rememberLauncherForActivityResult
-
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
             selectedVideo = uri
             resultVideo = null
             progress = 0f
             error = null
             status = "Video selected"
         }
+    }
 
     LaunchedEffect(Unit) {
         try {
             modelManager.ensureModels()
             modelReady = true
-            status =
-                if (selectedVideo == null) {
-                    "Choose a video to begin"
-                } else {
-                    "Ready to process"
-                }
-        } catch (exception: Exception) {
-            error = exception.message ?: "Unable to install model."
+            status = if (selectedVideo == null) {
+                "Choose a video to begin"
+            } else {
+                "Ready to process"
+            }
+        } catch (e: Exception) {
+            error = e.message ?: "Unable to install model."
             status = "Model setup failed"
         }
     }
@@ -202,86 +141,73 @@ private fun Video2AnimeApp() {
                     onStrengthChanged = { strength = it }
                 )
 
-                AnimatedVisibility(visible = processing) {
-                    ProgressCard(
-                        progress = progress,
-                        status = status
-                    )
+                AnimatedVisibility(processing) {
+                    ProgressCard(progress, status)
                 }
 
-                if (!processing) {
-                    Spacer(modifier = Modifier.weight(1f))
-                }
+                if (!processing) Spacer(Modifier.weight(1f))
 
                 if (!processing && error != null) {
-                    ErrorCard(message = error!!)
+                    ErrorCard(error!!)
                 }
 
-                if (!processing) {
-                    Spacer(modifier = Modifier.weight(0.2f))
-                }
+                if (!processing) Spacer(Modifier.weight(0.2f))
 
                 ProcessButton(
                     enabled = selectedVideo != null && modelReady && !processing,
-                    processing = processing,
-                    onClick = {
+                    processing = processing
+                ) {
 
-                        val input = selectedVideo ?: return@ProcessButton
+                    val input = selectedVideo ?: return@ProcessButton
 
-                        error = null
-                        processing = true
-                        progress = 0f
-                        status = "Preparing video..."
+                    error = null
+                    processing = true
+                    progress = 0f
+                    status = "Preparing video..."
 
-                        // PART 2 STARTS HERE
-                        // Replace from this point with Part 2.
-                                                scope.launch(Dispatchers.IO) {
-                            try {
-                                val result = videoProcessor.processVideo(
-                                    uri = input,
-                                    strengthPercent = strength,
-                                    onProgress = { current: Long, total: Long, stage: String ->
-                                        val value =
-                                            if (total > 0L) {
-                                                (current.toFloat() / total.toFloat()).coerceIn(0f, 1f)
-                                            } else {
-                                                0f
-                                            }
+                    scope.launch(Dispatchers.IO) {
+                        try {
 
-                                        scope.launch(Dispatchers.Main) {
-                                            progress = value
-                                            status = stage
-                                        }
+                            val result = videoProcessor.processVideo(
+                                uri = input,
+                                strength = strength
+                            ) { current: Int, total: Int, stage: String ->
+
+                                val value =
+                                    if (total > 0) {
+                                        (current.toFloat() / total.toFloat())
+                                            .coerceIn(0f, 1f)
+                                    } else {
+                                        0f
                                     }
-                                )
 
-                                withContext(Dispatchers.Main) {
-                                    resultVideo =
-                                        Uri.fromFile(
-                                            java.io.File(result.outputPath)
-                                        )
-
-                                    progress = 1f
-                                    status = "Your anime video is ready"
-                                    processing = false
+                                scope.launch(Dispatchers.Main) {
+                                    progress = value
+                                    status = stage
                                 }
+                            }
 
-                            } catch (exception: Exception) {
-                                withContext(Dispatchers.Main) {
-                                    processing = false
-                                    status = "Processing failed"
-                                    error =
-                                        exception.message
-                                            ?: "Unknown processing error."
-                                }
+                            withContext(Dispatchers.Main) {
+                                resultVideo = Uri.fromFile(result.outputFile)
+                                progress = 1f
+                                status = "Your anime video is ready"
+                                processing = false
+                            }
+
+                        } catch (e: Exception) {
+
+                            withContext(Dispatchers.Main) {
+                                processing = false
+                                status = "Processing failed"
+                                error = e.message ?: "Unknown processing error."
                             }
                         }
                     }
-                )
+                }
 
                 if (!processing) {
                     Text(
-                        text = "Everything runs offline on your device",
+                        "Everything runs offline on your device",
                         color = Muted,
                         fontSize = 11.sp,
                         textAlign = TextAlign.Center,
@@ -292,22 +218,18 @@ private fun Video2AnimeApp() {
         }
     }
 }
-
 @Composable
 private fun AppHeader() {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
-
         Box(
             modifier = Modifier
                 .size(50.dp)
                 .clip(RoundedCornerShape(16.dp))
                 .background(
-                    Brush.linearGradient(
-                        listOf(Accent, AccentBlue)
-                    )
+                    Brush.linearGradient(listOf(Accent, AccentBlue))
                 ),
             contentAlignment = Alignment.Center
         ) {
@@ -378,7 +300,6 @@ private fun VideoPickerCard(
             .padding(22.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-
         Box(
             modifier = Modifier
                 .size(68.dp)
@@ -413,12 +334,11 @@ private fun VideoPickerCard(
         Spacer(modifier = Modifier.height(5.dp))
 
         Text(
-            text =
-                if (selected) {
-                    "Tap to choose another video"
-                } else {
-                    "MP4, MOV, MKV and supported video formats"
-                },
+            text = if (selected) {
+                "Tap to choose another video"
+            } else {
+                "MP4, MOV, MKV and supported video formats"
+            },
             color = Muted,
             fontSize = 12.sp,
             textAlign = TextAlign.Center
@@ -439,12 +359,10 @@ private fun StrengthCard(
             .background(Card)
             .padding(18.dp)
     ) {
-
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-
             Column {
                 Text(
                     text = "HAYAO STRENGTH",
@@ -478,7 +396,6 @@ private fun StrengthCard(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-
             listOf(30, 40, 50, 60).forEach { value ->
                 StrengthChip(
                     value = value,
@@ -517,8 +434,7 @@ private fun StrengthChip(
             text = "$value%",
             color = if (selected) Color.White else Muted,
             fontSize = 13.sp,
-            fontWeight =
-                if (selected) FontWeight.Bold else FontWeight.Medium
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
         )
     }
 }
@@ -535,12 +451,10 @@ private fun ProgressCard(
             .background(Card)
             .padding(18.dp)
     ) {
-
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "PROCESSING",
@@ -599,9 +513,7 @@ private fun ProcessButton(
         ),
         onClick = onClick
     ) {
-
         if (processing) {
-
             CircularProgressIndicator(
                 modifier = Modifier.size(21.dp),
                 color = Color.White,
@@ -611,9 +523,7 @@ private fun ProcessButton(
             Spacer(modifier = Modifier.width(10.dp))
 
             Text(text = "PROCESSING...")
-
         } else {
-
             Icon(
                 imageVector = Icons.Default.AutoAwesome,
                 contentDescription = null
@@ -653,34 +563,28 @@ private fun ResultScreen(
     uri: Uri,
     onReset: () -> Unit
 ) {
-    val context =
-        androidx.compose.ui.platform.LocalContext.current
+    val context = androidx.compose.ui.platform.LocalContext.current
 
-    val player =
-        remember(uri) {
-            ExoPlayer.Builder(context).build().apply {
-                setMediaItem(MediaItem.fromUri(uri))
-                prepare()
-                playWhenReady = false
-            }
+    val player = remember(uri) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(uri))
+            prepare()
+            playWhenReady = false
         }
+    }
 
-    androidx.compose.runtime.DisposableEffect(player) {
-        onDispose {
-            player.release()
-        }
+    DisposableEffect(player) {
+        onDispose { player.release() }
     }
 
     Column(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-
             Icon(
                 imageVector = Icons.Default.CheckCircle,
                 contentDescription = null,
@@ -713,12 +617,11 @@ private fun ResultScreen(
                 .clip(RoundedCornerShape(23.dp))
                 .background(Color.Black)
         ) {
-
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { viewContext ->
                     PlayerView(viewContext).apply {
-                        this.player = player
+                        player = this@remember
                         useController = true
                     }
                 },
@@ -754,7 +657,6 @@ private fun ResultScreen(
                 containerColor = CardLight
             )
         ) {
-
             Icon(
                 imageVector = Icons.Default.Movie,
                 contentDescription = null
