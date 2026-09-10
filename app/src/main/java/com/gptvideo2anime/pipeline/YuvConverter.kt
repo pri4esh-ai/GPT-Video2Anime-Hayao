@@ -1,28 +1,44 @@
 package com.gptvideo2anime.pipeline
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.ImageFormat
-import android.graphics.Rect
-import android.graphics.YuvImage
+import android.graphics.Color
 import android.media.Image
-import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import kotlin.math.min
 
 object YuvConverter {
 
+    /**
+     * Direct YUV_420_888 -> ARGB_8888 conversion.
+     *
+     * This deliberately avoids:
+     *
+     * YUV -> JPEG -> Bitmap
+     *
+     * because that is extremely slow for video processing.
+     */
     fun imageToBitmap(
         image: Image
     ): Bitmap {
 
         require(
-            image.format == ImageFormat.YUV_420_888
+            image.format == android.graphics.ImageFormat.YUV_420_888
         ) {
             "Unsupported image format: ${image.format}"
         }
 
         val width = image.width
         val height = image.height
+
+        val bitmap =
+            Bitmap.createBitmap(
+                width,
+                height,
+                Bitmap.Config.ARGB_8888
+            )
+
+        val pixels =
+            IntArray(width * height)
 
         val yPlane = image.planes[0]
         val uPlane = image.planes[1]
@@ -39,119 +55,122 @@ object YuvConverter {
         val uPixelStride = uPlane.pixelStride
         val vPixelStride = vPlane.pixelStride
 
-        val uvWidth = (width + 1) / 2
-        val uvHeight = (height + 1) / 2
+        for (y in 0 until height) {
 
-        val ySize = width * height
-        val uvSize = uvWidth * uvHeight
+            val yRow =
+                y * yRowStride
 
-        /*
-         * YUV_420_888 -> NV21
-         *
-         * NV21:
-         * YYYYYYYY
-         * VUVUVUVU
-         */
-        val nv21 = ByteArray(
-            ySize + uvSize * 2
-        )
-
-        var yIndex = 0
-
-        for (row in 0 until height) {
-
-            val rowStart =
-                row * yRowStride
-
-            for (col in 0 until width) {
-
-                val sourceIndex =
-                    rowStart + col
-
-                nv21[yIndex++] =
-                    yBuffer.get(sourceIndex)
-            }
-        }
-
-        var uvIndex = ySize
-
-        for (row in 0 until uvHeight) {
+            val uvRow =
+                (y shr 1)
 
             val uRowStart =
-                row * uRowStride
+                uvRow * uRowStride
 
             val vRowStart =
-                row * vRowStride
+                uvRow * vRowStride
 
-            for (col in 0 until uvWidth) {
+            for (x in 0 until width) {
+
+                val yIndex =
+                    yRow + x
+
+                val uvX =
+                    x shr 1
 
                 val uIndex =
                     uRowStart +
-                        col * uPixelStride
+                        uvX * uPixelStride
 
                 val vIndex =
                     vRowStart +
-                        col * vPixelStride
+                        uvX * vPixelStride
 
-                nv21[uvIndex++] =
-                    vBuffer.get(vIndex)
+                val yValue =
+                    yBuffer
+                        .get(yIndex)
+                        .toInt() and 0xFF
 
-                nv21[uvIndex++] =
-                    uBuffer.get(uIndex)
+                val uValue =
+                    uBuffer
+                        .get(uIndex)
+                        .toInt() and 0xFF
+
+                val vValue =
+                    vBuffer
+                        .get(vIndex)
+                        .toInt() and 0xFF
+
+                /*
+                 * BT.601 YUV -> RGB.
+                 *
+                 * This is the standard conversion used
+                 * for ordinary camera/video YUV.
+                 */
+                val c =
+                    yValue - 16
+
+                val d =
+                    uValue - 128
+
+                val e =
+                    vValue - 128
+
+                val red =
+                    (
+                        298 * c +
+                            409 * e +
+                            128
+                        ) shr 8
+
+                val green =
+                    (
+                        298 * c -
+                            100 * d -
+                            208 * e +
+                            128
+                        ) shr 8
+
+                val blue =
+                    (
+                        298 * c +
+                            516 * d +
+                            128
+                        ) shr 8
+
+                pixels[
+                    y * width + x
+                ] =
+                    Color.rgb(
+                        red.coerceIn(0, 255),
+                        green.coerceIn(0, 255),
+                        blue.coerceIn(0, 255)
+                    )
             }
         }
 
-        val yuvImage =
-            YuvImage(
-                nv21,
-                ImageFormat.NV21,
-                width,
-                height,
-                null
-            )
-
-        val output =
-            ByteArrayOutputStream(
-                min(
-                    width * height / 2,
-                    1024 * 1024
-                )
-            )
-
-        yuvImage.compressToJpeg(
-            Rect(
-                0,
-                0,
-                width,
-                height
-            ),
-            100,
-            output
-        )
-
-        val bytes =
-            output.toByteArray()
-
-        return BitmapFactory.decodeByteArray(
-            bytes,
+        bitmap.setPixels(
+            pixels,
             0,
-            bytes.size
+            width,
+            0,
+            0,
+            width,
+            height
         )
-            ?: throw IllegalStateException(
-                "Failed to decode YUV frame."
-            )
+
+        return bitmap
     }
 
     /**
-     * Bitmap -> NV12.
+     * Bitmap -> YUV420.
      *
-     * COLOR_FormatYUV420SemiPlanar normally expects:
+     * This method produces NV12:
      *
      * YYYYYYYY
      * UVUVUVUV
      *
-     * The previous implementation produced VU,
-     * which can cause strongly blue/purple skin.
+     * It is retained for compatibility with the
+     * existing MediaCodec pipeline.
      */
     fun bitmapToYuv420(
         bitmap: Bitmap
@@ -163,22 +182,13 @@ object YuvConverter {
         var height =
             bitmap.height
 
-        /*
-         * H.264 YUV420 requires even dimensions.
-         */
-        width =
-            if (width % 2 == 0) {
-                width
-            } else {
-                width - 1
-            }
+        if (width % 2 != 0) {
+            width--
+        }
 
-        height =
-            if (height % 2 == 0) {
-                height
-            } else {
-                height - 1
-            }
+        if (height % 2 != 0) {
+            height--
+        }
 
         width =
             width.coerceAtLeast(2)
@@ -186,13 +196,13 @@ object YuvConverter {
         height =
             height.coerceAtLeast(2)
 
-        val argb =
+        val pixels =
             IntArray(
                 width * height
             )
 
         bitmap.getPixels(
-            argb,
+            pixels,
             0,
             width,
             0,
@@ -204,31 +214,14 @@ object YuvConverter {
         val frameSize =
             width * height
 
-        val chromaWidth =
-            width / 2
-
-        val chromaHeight =
-            height / 2
-
-        val chromaSize =
-            chromaWidth * chromaHeight
-
-        /*
-         * NV12:
-         *
-         * Y plane
-         * UV plane
-         */
         val output =
             ByteArray(
                 frameSize +
-                    chromaSize * 2
+                    frameSize / 2
             )
 
         /*
-         * -------------------------
-         * Y PLANE
-         * -------------------------
+         * Y plane.
          */
         var yIndex = 0
 
@@ -237,7 +230,7 @@ object YuvConverter {
             for (i in 0 until width) {
 
                 val color =
-                    argb[
+                    pixels[
                         j * width + i
                     ]
 
@@ -250,14 +243,6 @@ object YuvConverter {
                 val b =
                     color and 0xFF
 
-                /*
-                 * BT.601 limited range.
-                 *
-                 * Y = 16 +
-                 *     0.257R +
-                 *     0.504G +
-                 *     0.098B
-                 */
                 val y =
                     (
                         16 +
@@ -265,22 +250,19 @@ object YuvConverter {
                             129 * g +
                             25 * b +
                             128
-                    ) shr 8
+                        ) shr 8
 
                 output[yIndex++] =
-                    y.coerceIn(
-                        16,
-                        235
-                    ).toByte()
+                    y
+                        .coerceIn(16, 235)
+                        .toByte()
             }
         }
 
         /*
-         * -------------------------
-         * UV PLANE
-         * -------------------------
+         * UV plane.
          *
-         * 2x2 chroma subsampling.
+         * NV12 = U,V
          */
         var uvIndex =
             frameSize
@@ -299,18 +281,14 @@ object YuvConverter {
 
                         val x =
                             (i + dx)
-                                .coerceAtMost(
-                                    width - 1
-                                )
+                                .coerceAtMost(width - 1)
 
                         val y =
                             (j + dy)
-                                .coerceAtMost(
-                                    height - 1
-                                )
+                                .coerceAtMost(height - 1)
 
                         val color =
-                            argb[
+                            pixels[
                                 y * width + x
                             ]
 
@@ -323,9 +301,6 @@ object YuvConverter {
                         val b =
                             color and 0xFF
 
-                        /*
-                         * BT.601 limited-range U.
-                         */
                         val u =
                             (
                                 128 -
@@ -333,11 +308,8 @@ object YuvConverter {
                                     74 * g +
                                     112 * b +
                                     128
-                            ) shr 8
+                                ) shr 8
 
-                        /*
-                         * BT.601 limited-range V.
-                         */
                         val v =
                             (
                                 128 +
@@ -345,36 +317,22 @@ object YuvConverter {
                                     94 * g -
                                     18 * b +
                                     128
-                            ) shr 8
+                                ) shr 8
 
                         sumU += u
                         sumV += v
-
                         count++
                     }
                 }
 
                 val u =
                     (sumU / count)
-                        .coerceIn(
-                            16,
-                            240
-                        )
+                        .coerceIn(16, 240)
 
                 val v =
                     (sumV / count)
-                        .coerceIn(
-                            16,
-                            240
-                        )
+                        .coerceIn(16, 240)
 
-                /*
-                 * IMPORTANT:
-                 *
-                 * NV12 = U V
-                 *
-                 * Do NOT change this to V U.
-                 */
                 output[uvIndex++] =
                     u.toByte()
 
@@ -391,11 +349,7 @@ object YuvConverter {
         maxSize: Int
     ): Bitmap {
 
-        require(
-            maxSize > 0
-        ) {
-            "maxSize must be greater than zero."
-        }
+        require(maxSize > 0)
 
         val scale =
             min(
@@ -410,34 +364,16 @@ object YuvConverter {
             return bitmap
         }
 
-        /*
-         * Calculate dimensions first.
-         */
         var width =
             (
                 bitmap.width * scale
-            )
-                .toInt()
-                .coerceAtLeast(2)
+            ).toInt()
 
         var height =
             (
                 bitmap.height * scale
-            )
-                .toInt()
-                .coerceAtLeast(2)
+            ).toInt()
 
-        /*
-         * Force even dimensions.
-         *
-         * Kotlin does not support:
-         *
-         * value and -2
-         *
-         * in this context.
-         *
-         * So use modulo instead.
-         */
         if (width % 2 != 0) {
             width--
         }
@@ -466,14 +402,11 @@ object YuvConverter {
     ): ByteArray {
 
         val output =
-            ByteArrayOutputStream()
+            java.io.ByteArrayOutputStream()
 
         bitmap.compress(
             Bitmap.CompressFormat.JPEG,
-            quality.coerceIn(
-                0,
-                100
-            ),
+            quality.coerceIn(0, 100),
             output
         )
 
