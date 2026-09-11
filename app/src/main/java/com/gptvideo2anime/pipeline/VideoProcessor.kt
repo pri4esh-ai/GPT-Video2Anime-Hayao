@@ -5,6 +5,8 @@ import android.net.Uri
 import android.util.Log
 import com.gptvideo2anime.inference.OnnxAnimeEngine
 import com.gptvideo2anime.model.ModelManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 data class ProcessResult(
@@ -23,17 +25,17 @@ class VideoProcessor(
     private val modelManager = ModelManager(context)
     private val codecEngine = MediaCodecVideoEngine(context)
 
-    fun processVideo(
+    suspend fun processVideo(
         uri: Uri,
         strength: Int,
         onProgress: (Int, Int, String) -> Unit
-    ): ProcessResult {
+    ): ProcessResult = withContext(Dispatchers.IO) {
 
         // Validate URI and retrieve metadata
         val videoInfo = codecEngine.inspect(uri)
         Log.i(TAG, "Processing video: ${videoInfo.width}x${videoInfo.height}, FPS: ${videoInfo.frameRate}")
 
-        // Ensure model file is accessible
+        // Ensure model file is accessible (calling suspend fun animeModelPath inside coroutine)
         val modelPath = modelManager.animeModelPath()
             ?: throw IllegalStateException("AnimeGAN model missing from local storage.")
 
@@ -71,7 +73,7 @@ class VideoProcessor(
             throw IllegalStateException("Failed to generate processed output video.")
         }
 
-        return ProcessResult(outputFile)
+        ProcessResult(outputFile)
     }
 
     private fun cleanOldOutputs(outputDir: File) {
