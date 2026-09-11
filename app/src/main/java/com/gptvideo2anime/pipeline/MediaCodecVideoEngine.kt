@@ -3,6 +3,8 @@ package com.gptvideo2anime.pipeline
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
@@ -47,6 +49,19 @@ class MediaCodecVideoEngine(
         }
     }
 
+    private fun createDecoderForMime(mimeType: String): MediaCodec {
+        val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+        val codecInfo = codecList.codecInfos.firstOrNull { info ->
+            !info.isEncoder && info.supportedTypes.any { it.equals(mimeType, ignoreCase = true) }
+        }
+
+        return if (codecInfo != null) {
+            MediaCodec.createByCodecName(codecInfo.name)
+        } else {
+            MediaCodec.createDecoderByType(mimeType)
+        }
+    }
+
     fun processVideo(
         inputUri: Uri,
         outputFile: File,
@@ -69,6 +84,7 @@ class MediaCodecVideoEngine(
             val videoTrack = selectVideoTrack(extractor)
             extractor.selectTrack(videoTrack)
             val inputFormat = extractor.getTrackFormat(videoTrack)
+            val mimeType = inputFormat.getString(MediaFormat.KEY_MIME)!!
 
             // Setup Encoder
             val outputFormat = MediaFormat.createVideoFormat(
@@ -91,8 +107,8 @@ class MediaCodecVideoEngine(
             var muxerStarted = false
             var trackIndex = -1
 
-            // Setup Decoder
-            decoder = MediaCodec.createDecoderByType(inputFormat.getString(MediaFormat.KEY_MIME)!!).apply {
+            // Setup Decoder using helper method with explicit !info.isEncoder check
+            decoder = createDecoderForMime(mimeType).apply {
                 configure(inputFormat, null, null, 0)
                 start()
             }
