@@ -9,6 +9,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -30,7 +31,6 @@ class MainActivity : ComponentActivity() {
 
     private var selectedVideoUri: Uri? = null
 
-    // Modern, permission-safe video picker
     private val videoPickerLauncher = registerForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
@@ -40,12 +40,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Permission handler for API 33+ (Video) and API 33+ (Notifications)
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         if (permissions.values.all { it }) {
-            videoPickerLauncher.launch(ActivityResultContracts.PickVisualMedia.VideoOnly)
+            // FIXED: Wrapped in PickVisualMediaRequest
+            videoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
         }
     }
 
@@ -69,7 +69,6 @@ class MainActivity : ComponentActivity() {
         val permissionsToRequest = mutableListOf<String>()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // API 33+ requires specific media permissions
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO) != PackageManager.PERMISSION_GRANTED) {
                 permissionsToRequest.add(Manifest.permission.READ_MEDIA_VIDEO)
             }
@@ -77,7 +76,6 @@ class MainActivity : ComponentActivity() {
                 permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
             }
         } else {
-            // Legacy API 32 and below
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
                 permissionsToRequest.add(Manifest.permission.READ_EXTERNAL_STORAGE)
             }
@@ -86,7 +84,8 @@ class MainActivity : ComponentActivity() {
         if (permissionsToRequest.isNotEmpty()) {
             permissionLauncher.launch(permissionsToRequest.toTypedArray())
         } else {
-            videoPickerLauncher.launch(ActivityResultContracts.PickVisualMedia.VideoOnly)
+            // FIXED: Wrapped in PickVisualMediaRequest here too
+            videoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
         }
     }
 
@@ -95,7 +94,6 @@ class MainActivity : ComponentActivity() {
             putExtra(VideoProcessingService.EXTRA_VIDEO_URI, uri)
         }
         
-        // FIXED: Must use startForegroundService for API 26+ to comply with background execution limits
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {
