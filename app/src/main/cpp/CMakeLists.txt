@@ -9,6 +9,7 @@ add_library(
     anime_engine
     SHARED
     native_bridge.cpp
+    NativeYuvUtils.cpp
 )
 
 find_library(log-lib log)
