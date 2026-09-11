@@ -1,24 +1,48 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Network access for AI model downloads or remote APIs -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Granular Media permissions for Android 13+ (API 33+) -->
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    
+    <!-- Legacy storage permissions for Android 12 and below (API <= 32) -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28"
+        tools:ignore="ScopedStorage" />
+
+    <!-- CPU keeping active during long video processing tasks -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Foreground service permissions for Android 14+ (API 34) background pipeline -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Require OpenGLES 2.0+ for hardware texture processing -->
+    <uses-feature
+        android:glEsVersion="0x00020000"
+        android:required="true" />
 
     <application
         android:allowBackup="true"
-        android:label="Video2Anime"
+        android:icon="@mipmap/ic_launcher"
+        android:label="GPT Video2Anime"
         android:supportsRtl="true"
-        android:theme="@style/AppTheme"
-        android:usesCleartextTraffic="false">
+        android:theme="@style/Theme.AppCompat.Light.NoActionBar"
+        android:usesCleartextTraffic="false"
+        android:hardwareAccelerated="true">
 
         <activity
             android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true"
             android:screenOrientation="portrait">
 
@@ -29,8 +53,10 @@
 
         </activity>
 
+        <!-- Background Video Processing Service -->
         <service
             android:name=".pipeline.VideoProcessingService"
+            android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaProcessing" />
 
