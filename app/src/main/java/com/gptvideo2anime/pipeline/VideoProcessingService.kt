@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
@@ -24,6 +25,9 @@ class VideoProcessingService : Service() {
 
         const val EXTRA_INPUT_URI =
             "com.gptvideo2anime.extra.INPUT_URI"
+
+        const val EXTRA_STRENGTH =
+            "com.gptvideo2anime.extra.STRENGTH"
 
         const val ACTION_PROGRESS =
             "com.gptvideo2anime.PROGRESS"
@@ -52,10 +56,7 @@ class VideoProcessingService : Service() {
 
         createNotificationChannel()
 
-        startForeground(
-            NOTIFICATION_ID,
-            createNotification("Preparing video processing...")
-        )
+        promoteToForeground("Preparing video processing...")
     }
 
     override fun onStartCommand(
@@ -72,6 +73,9 @@ class VideoProcessingService : Service() {
         val inputUri =
             intent.getStringExtra(EXTRA_INPUT_URI)
 
+        val strength =
+            intent.getIntExtra(EXTRA_STRENGTH, 40)
+
         if (inputUri.isNullOrBlank()) {
             sendProgress("Failed", 0, 0)
             updateNotification("No input video selected")
@@ -83,6 +87,7 @@ class VideoProcessingService : Service() {
             try {
                 processVideo(
                     inputUri = inputUri,
+                    strength = strength,
                     startId = startId
                 )
             } catch (exception: Exception) {
@@ -98,6 +103,7 @@ class VideoProcessingService : Service() {
 
     private suspend fun processVideo(
         inputUri: String,
+        strength: Int,
         startId: Int
     ) {
 
@@ -110,7 +116,7 @@ class VideoProcessingService : Service() {
         val result =
             videoProcessor.processVideo(
                 uri = Uri.parse(inputUri),
-                strength = 40
+                strength = strength
             ) { current, total, stage ->
 
                 sendProgress(
@@ -141,10 +147,11 @@ class VideoProcessingService : Service() {
 
         updateNotification("Processing complete")
 
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopForegroundService()
         stopSelf(startId)
     }
-        private fun handleProcessingError(
+
+    private fun handleProcessingError(
         exception: Exception,
         startId: Int
     ) {
@@ -167,8 +174,31 @@ class VideoProcessingService : Service() {
 
         updateNotification("Failed: $message")
 
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopForegroundService()
         stopSelf(startId)
+    }
+
+    private fun promoteToForeground(text: String) {
+        val notification = createNotification(text)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            } else {
+                0
+            }
+            startForeground(NOTIFICATION_ID, notification, serviceType)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun stopForegroundService() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
     }
 
     private fun sendProgress(
@@ -178,6 +208,7 @@ class VideoProcessingService : Service() {
     ) {
         sendBroadcast(
             Intent(ACTION_PROGRESS).apply {
+                setPackage(packageName)
                 putExtra(EXTRA_STAGE, stage)
                 putExtra(EXTRA_CURRENT, current)
                 putExtra(EXTRA_TOTAL, total)
@@ -193,6 +224,7 @@ class VideoProcessingService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 Notification.Builder(this, CHANNEL_ID)
             } else {
+                @Suppress("DEPRECATION")
                 Notification.Builder(this)
             }
 
@@ -216,11 +248,6 @@ class VideoProcessingService : Service() {
         manager.notify(
             NOTIFICATION_ID,
             createNotification(text)
-        )
-
-        Log.i(
-            "VideoProcessingService",
-            text
         )
     }
 
