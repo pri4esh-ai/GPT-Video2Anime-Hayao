@@ -21,7 +21,7 @@
     <!-- CPU keeping active during long video processing tasks -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- Foreground service permissions for Android 14+ (API 34) background pipeline -->
+    <!-- Foreground service permissions for background pipeline -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -33,10 +33,11 @@
 
     <application
         android:allowBackup="true"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:roundIcon="@android:drawable/sym_def_app_icon"
         android:label="GPT Video2Anime"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AppCompat.Light.NoActionBar"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
         android:usesCleartextTraffic="false"
         android:hardwareAccelerated="true">
 
