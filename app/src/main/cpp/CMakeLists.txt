@@ -2,8 +2,9 @@ cmake_minimum_required(VERSION 3.22.1)
 project("gptvideo2anime")
 
 # Compile native bridge and YUV utilities into shared library
+# FIXED: Changed library name from 'native_bridge' to 'gptvideo2anime'
 add_library(
-    native_bridge
+    gptvideo2anime
     SHARED
     native_bridge.cpp
     NativeYuvUtils.cpp
@@ -16,7 +17,7 @@ find_library(graphics-lib jnigraphics)
 
 # Link NDK libraries to target
 target_link_libraries(
-    native_bridge
+    gptvideo2anime
     ${log-lib}
     ${android-lib}
     ${graphics-lib}
