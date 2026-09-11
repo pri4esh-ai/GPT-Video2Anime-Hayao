@@ -324,7 +324,6 @@ private fun StrengthCard(
 
         val options = listOf(30, 40, 50, 60, 70, 80, 90, 100)
 
-        // 2-row grid for 30% to 100% options
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -622,3 +621,4 @@ private fun ResultScreen(
         }
     }
 }
+1
