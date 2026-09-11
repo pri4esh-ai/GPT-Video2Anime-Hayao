@@ -1,10 +1,6 @@
 package com.gptvideo2anime.pipeline
 
 import android.content.Context
-import android.media.MediaCodec
-import android.media.MediaCodecInfo
-import android.media.MediaFormat
-import android.media.MediaMuxer
 import android.net.Uri
 import android.util.Log
 import com.gptvideo2anime.inference.OnnxAnimeEngine
@@ -26,7 +22,6 @@ class VideoProcessor(
         private const val TAG = "VideoProcessor"
         private const val MAX_TEMP_FILES = 5
         private const val MODEL_SIZE = 512
-        private const val TIMEOUT_US = 10000L
     }
 
     private val modelManager = ModelManager(context)
@@ -37,7 +32,6 @@ class VideoProcessor(
         onProgress: (Int, Int, String) -> Unit
     ): ProcessResult = withContext(Dispatchers.IO) {
 
-        // 1. Resolve Model Path
         val modelPath = modelManager.animeModelPath()
             ?: throw IllegalStateException("AnimeGAN model missing from local storage.")
 
@@ -46,20 +40,15 @@ class VideoProcessor(
             "AnimeGAN model file is invalid or empty at $modelPath"
         }
 
-        // 2. Prepare Input File (copy content Uri to temp file if necessary for MediaExtractor)
         val inputVideoFile = cacheUriToFile(uri)
-
-        // 3. Setup Output Directory
         val outputDir = File(context.filesDir, "output").apply { mkdirs() }
         cleanOldOutputs(outputDir)
 
         val outputFile = File(outputDir, "anime_${System.currentTimeMillis()}.mp4")
 
-        // 4. Initialize Engines and Pipeline
         OnnxAnimeEngine(modelPath).use { engine ->
             MediaCodecVideoEngine().use { decoderEngine ->
                 
-                // Use SurfacePipeline to tie decoder output surface to ONNX processing
                 SurfacePipeline(MODEL_SIZE, MODEL_SIZE, engine).use { pipeline ->
                     
                     decoderEngine.setup(inputVideoFile, pipeline.decoderSurface)
@@ -69,19 +58,28 @@ class VideoProcessor(
                     val durationUs = decoderEngine.getDurationUs()
                     
                     Log.i(TAG, "Starting video processing: ${width}x${height}, duration: ${durationUs}us")
-
                     onProgress(0, 100, "Decoding & Styling")
 
-                    // Frame-by-frame decoding and anime style inference loop
                     var frameCount = 0
-                    val estimatedTotalFrames = if (durationUs > 0) (durationUs / 33333).toInt() else 150
+                    var isDecoderDone = false
+                    var framesInFlight = 0
 
+                    // FIXED: Robust loop that prevents queue overflow and properly drains the pipeline at EOF
                     while (true) {
-                        val decoded = decoderEngine.decodeNextFrame()
-                        val processedBitmap = pipeline.processNextFrame()
+                        if (!isDecoderDone) {
+                            val decoded = decoderEngine.decodeNextFrame()
+                            if (!decoded) {
+                                isDecoderDone = true
+                            } else {
+                                framesInFlight++
+                            }
+                        }
 
+                        val processedBitmap = pipeline.processNextFrame()
                         if (processedBitmap != null) {
                             frameCount++
+                            framesInFlight--
+                            
                             val progress = if (durationUs > 0) {
                                 ((frameCount * 33333L * 100) / durationUs).toInt().coerceIn(0, 99)
                             } else {
@@ -91,8 +89,14 @@ class VideoProcessor(
                             processedBitmap.recycle()
                         }
 
-                        if (!decoded && processedBitmap == null) {
+                        // Break only if decoder is done AND no more frames are in the pipeline queue
+                        if (isDecoderDone && framesInFlight <= 0 && processedBitmap == null) {
                             break
+                        }
+                        
+                        // Prevent tight infinite loop if decoder is done but waiting on async ImageReader callback
+                        if (isDecoderDone && processedBitmap == null) {
+                            Thread.sleep(10) 
                         }
                     }
 
