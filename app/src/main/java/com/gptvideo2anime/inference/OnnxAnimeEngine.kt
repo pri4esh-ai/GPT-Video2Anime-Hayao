@@ -25,9 +25,9 @@ class OnnxAnimeEngine(
         setInterOpNumThreads(1)
         setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
         
-        // Attempt NNAPI (Hardware/GPU Acceleration on Android)
+        // Attempt NNAPI (Hardware/GPU Acceleration on Android) safely
         runCatching {
-            addNnapi(setOf(OrtSession.SessionOptions.NNAPIFlags.USE_FP16))
+            addNnapi()
         }
     }
 
