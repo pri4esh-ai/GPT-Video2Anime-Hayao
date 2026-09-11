@@ -10,7 +10,10 @@ class OnnxAnimeEngine(
     private val modelPath: String
 ) : Closeable {
 
-    enum class Layout { NCHW, NHWC }
+    enum class Layout {
+        NCHW,
+        NHWC
+    }
 
     private val environment = OrtEnvironment.getEnvironment()
 
@@ -63,19 +66,24 @@ class OnnxAnimeEngine(
     @Synchronized
     fun processFrame(frame: Bitmap): Bitmap {
 
-        require(!frame.isRecycled)
+        require(!frame.isRecycled) {
+            "Input bitmap is recycled."
+        }
 
         val resized =
             if (
                 frame.width == modelWidth &&
                 frame.height == modelHeight
-            ) frame
-            else Bitmap.createScaledBitmap(
-                frame,
-                modelWidth,
-                modelHeight,
-                true
-            )
+            ) {
+                frame
+            } else {
+                Bitmap.createScaledBitmap(
+                    frame,
+                    modelWidth,
+                    modelHeight,
+                    true
+                )
+            }
 
         val ownsResized =
             resized !== frame
@@ -131,25 +139,19 @@ class OnnxAnimeEngine(
                 }
             }
 
-            val shape =
-                when (inputLayout) {
+            val shape = inputInfo.shape.copyOf()
 
-                    Layout.NCHW ->
-                        longArrayOf(
-                            1,
-                            3,
-                            modelHeight.toLong(),
-                            modelWidth.toLong()
-                        )
+            if (shape[0] <= 0L) shape[0] = 1L
 
-                    Layout.NHWC ->
-                        longArrayOf(
-                            1,
-                            modelHeight.toLong(),
-                            modelWidth.toLong(),
-                            3
-                        )
-                }
+            if (inputLayout == Layout.NCHW) {
+                shape[1] = 3L
+                shape[2] = modelHeight.toLong()
+                shape[3] = modelWidth.toLong()
+            } else {
+                shape[1] = modelHeight.toLong()
+                shape[2] = modelWidth.toLong()
+                shape[3] = 3L
+            }
 
             OnnxTensor.createTensor(
                 environment,
@@ -161,7 +163,9 @@ class OnnxAnimeEngine(
                     mapOf(inputName to tensor)
                 ).use { result ->
 
-                    require(result.size() > 0)
+                    require(result.size() > 0) {
+                        "ONNX model returned no output."
+                    }
 
                     val outputInfo =
                         session.outputInfo[
@@ -169,10 +173,18 @@ class OnnxAnimeEngine(
                         ]?.info as? TensorInfo
 
                     return outputToBitmap(
-                        output = result[0].value!!,
-                        outputShape = outputInfo?.shape,
-                        outputWidth = frame.width,
-                        outputHeight = frame.height
+                        output =
+                            result[0].value
+                                ?: error("ONNX output is null"),
+
+                        outputShape =
+                            outputInfo?.shape,
+
+                        outputWidth =
+                            frame.width,
+
+                        outputHeight =
+                            frame.height
                     )
                 }
             }
@@ -188,7 +200,7 @@ class OnnxAnimeEngine(
         }
     }
 
-    fun infer(frame: Bitmap) =
+    fun infer(frame: Bitmap): Bitmap =
         processFrame(frame)
 
     private fun outputToBitmap(
@@ -234,9 +246,7 @@ class OnnxAnimeEngine(
         val count =
             outWidth * outHeight
 
-        require(
-            data.size >= count * 3
-        ) {
+        require(data.size >= count * 3) {
             "ONNX output too small: ${data.size}"
         }
 
@@ -264,13 +274,13 @@ class OnnxAnimeEngine(
 
                 for (i in 0 until count) {
 
-                    val b = i * 3
+                    val base = i * 3
 
                     pixels[i] =
                         argb(
-                            modelValueToByte(data[b]),
-                            modelValueToByte(data[b + 1]),
-                            modelValueToByte(data[b + 2])
+                            modelValueToByte(data[base]),
+                            modelValueToByte(data[base + 1]),
+                            modelValueToByte(data[base + 2])
                         )
                 }
             }
@@ -313,7 +323,9 @@ class OnnxAnimeEngine(
             if (
                 scaled !== bitmap &&
                 !bitmap.isRecycled
-            ) bitmap.recycle()
+            ) {
+                bitmap.recycle()
+            }
 
             scaled
         }
@@ -366,7 +378,8 @@ class OnnxAnimeEngine(
                     v.forEach(::visit)
 
                 is Number ->
-                    result[index++] = v.toFloat()
+                    result[index++] =
+                        v.toFloat()
             }
         }
 
@@ -398,29 +411,30 @@ class OnnxAnimeEngine(
         defaultLayout: Layout
     ): Layout {
 
-        return when {
+        if (shape.size != 4)
+            return defaultLayout
 
-            shape.size == 4 &&
-                shape[1] == 3L ->
-                Layout.NCHW
+        if (shape[1] == 3L)
+            return Layout.NCHW
 
-            shape.size == 4 &&
-                shape[3] == 3L ->
-                Layout.NHWC
+        if (shape[3] == 3L)
+            return Layout.NHWC
 
-            else ->
-                defaultLayout
-        }
+        return defaultLayout
     }
 
     private fun resolveDimension(
         value: Long,
         fallback: Int
     ): Int =
-        if (value > 0) value.toInt()
-        else fallback
+        if (value > 0L)
+            value.toInt()
+        else
+            fallback
 
-    private fun modelValueToByte(value: Float): Int =
+    private fun modelValueToByte(
+        value: Float
+    ): Int =
         (((value + 1f) * 127.5f).roundToInt())
             .coerceIn(0, 255)
 
