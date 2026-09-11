@@ -1,22 +1,23 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.22.1)
+project("gptvideo2anime")
 
-project(anime_engine)
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
+# Compile native bridge and YUV utilities into shared library
 add_library(
-    anime_engine
+    native_bridge
     SHARED
     native_bridge.cpp
     NativeYuvUtils.cpp
 )
 
+# Locate required Android system NDK libraries
 find_library(log-lib log)
-find_library(jnigraphics-lib jnigraphics)
+find_library(android-lib android)
+find_library(graphics-lib jnigraphics)
 
+# Link NDK libraries to target
 target_link_libraries(
-    anime_engine
+    native_bridge
     ${log-lib}
-    ${jnigraphics-lib}
+    ${android-lib}
+    ${graphics-lib}
 )
