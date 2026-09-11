@@ -2,9 +2,27 @@ package com.gptvideo2anime.pipeline
 
 import android.graphics.Bitmap
 import android.media.Image
-import com.gptvideo2anime.util.NativeYuvUtils
+import java.nio.ByteBuffer
 
 object YuvConverter {
+
+    init {
+        // Load the native library directly here
+        System.loadLibrary("gptvideo2anime")
+    }
+
+    // Declare the external function directly in this file
+    private external fun convertYuvToBitmapNative(
+        yBuffer: ByteBuffer,
+        uBuffer: ByteBuffer,
+        vBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        yRowStride: Int,
+        uvRowStride: Int,
+        uvPixelStride: Int,
+        bitmap: Bitmap
+    )
 
     /**
      * Converts a YUV_420_888 Image directly into a new ARGB Bitmap 
@@ -20,7 +38,7 @@ object YuvConverter {
         val uBuffer = planes[1].buffer
         val vBuffer = planes[2].buffer
 
-        NativeYuvUtils.convertYuvToBitmapNative(
+        convertYuvToBitmapNative(
             yBuffer = yBuffer,
             uBuffer = uBuffer,
             vBuffer = vBuffer,
