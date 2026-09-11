@@ -322,18 +322,37 @@ private fun StrengthCard(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            listOf(30, 40, 50, 60).forEach { value ->
-                StrengthChip(
-                    value = value,
-                    selected = value == strength,
-                    enabled = enabled,
-                    onClick = { onStrengthChanged(value) },
-                    modifier = Modifier.weight(1f)
-                )
+        val options = listOf(30, 40, 50, 60, 70, 80, 90, 100)
+
+        // 2-row grid for 30% to 100% options
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                options.take(4).forEach { value ->
+                    StrengthChip(
+                        value = value,
+                        selected = value == strength,
+                        enabled = enabled,
+                        onClick = { onStrengthChanged(value) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                options.takeLast(4).forEach { value ->
+                    StrengthChip(
+                        value = value,
+                        selected = value == strength,
+                        enabled = enabled,
+                        onClick = { onStrengthChanged(value) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
             }
         }
     }
