@@ -13,48 +13,54 @@ class ModelManager(
 
     companion object {
         private const val MODEL_DIR = "models"
-
-        private const val ANIME_ASSET =
-            "models/AnimeGANv3_Hayao_36.onnx"
-
-        private const val ANIME_NAME =
-            "AnimeGANv3_Hayao_36.onnx"
-
-        private const val ANIME_SHA256 =
-            "95ba7b219073fd5b12f569bc38056ffd3019cf4caf15b1feb9f73d1286c9f69d"
+        private const val ANIME_ASSET = "models/AnimeGANv3_Hayao_36.onnx"
+        private const val ANIME_NAME = "AnimeGANv3_Hayao_36.onnx"
+        private const val ANIME_SHA256 = "95ba7b219073fd5b12f569bc38056ffd3019cf4caf15b1feb9f73d1286c9f69d"
+        private const val BUFFER_SIZE = 1024 * 1024 // 1MB buffer
     }
 
-    private val modelDirectory =
-        File(context.filesDir, MODEL_DIR)
+    private val modelDirectory = File(context.filesDir, MODEL_DIR)
+    private val animeFile = File(modelDirectory, ANIME_NAME)
 
-    private val animeFile =
-        File(modelDirectory, ANIME_NAME)
-
-    fun animeModelPath(): String? {
-        return if (isValid(animeFile, ANIME_SHA256)) {
+    /**
+     * Retrieves the absolute path to the verified ONNX model.
+     * Offloads SHA-256 calculation to Dispatchers.IO to prevent main-thread lag.
+     */
+    suspend fun animeModelPath(): String? = withContext(Dispatchers.IO) {
+        if (isValid(animeFile, ANIME_SHA256)) {
             animeFile.absolutePath
         } else {
             null
         }
     }
 
-    fun areAllModelsInstalled(): Boolean {
-        return animeModelPath() != null
+    /**
+     * Non-blocking suspension check to determine if all models are present and valid.
+     */
+    suspend fun areAllModelsInstalled(): Boolean = withContext(Dispatchers.IO) {
+        animeModelPath() != null
     }
 
-    fun modelStatus(): String {
-        return if (areAllModelsInstalled()) {
+    /**
+     * Non-blocking suspension query for UI status messaging.
+     */
+    suspend fun modelStatus(): String = withContext(Dispatchers.IO) {
+        if (areAllModelsInstalled()) {
             "Hayao model ready"
         } else {
             "Installing Hayao model..."
         }
     }
 
+    /**
+     * Ensures models are unpacked from assets to internal storage and verified.
+     */
     suspend fun ensureModels(
         onLog: ((String) -> Unit)? = null
     ) = withContext(Dispatchers.IO) {
-
-        modelDirectory.mkdirs()
+        if (!modelDirectory.exists()) {
+            modelDirectory.mkdirs()
+        }
 
         copyAssetIfNeeded(
             assetName = ANIME_ASSET,
@@ -63,8 +69,8 @@ class ModelManager(
             onLog = onLog
         )
 
-        require(animeModelPath() != null) {
-            "Hayao model installation failed."
+        require(isValid(animeFile, ANIME_SHA256)) {
+            "Hayao model installation failed verification."
         }
 
         onLog?.invoke("Hayao model ready.")
@@ -82,36 +88,38 @@ class ModelManager(
 
         onLog?.invoke("Installing ${target.name}...")
 
-        val temp = File(
-            target.parentFile,
-            "${target.name}.part"
-        )
+        val temp = File(target.parentFile, "${target.name}.part")
 
-        context.assets.open(assetName).use { input ->
-            FileOutputStream(temp).use { output ->
-                input.copyTo(
-                    output,
-                    bufferSize = 1024 * 1024
-                )
+        try {
+            if (temp.exists()) {
+                temp.delete()
             }
-        }
 
-        val actualSha = sha256(temp)
+            context.assets.open(assetName).use { input ->
+                FileOutputStream(temp).use { output ->
+                    input.copyTo(output, bufferSize = BUFFER_SIZE)
+                }
+            }
 
-        require(actualSha.equals(expectedSha, true)) {
-            "SHA mismatch for ${target.name}"
-        }
+            val actualSha = sha256(temp)
 
-        if (target.exists()) {
-            target.delete()
-        }
+            require(actualSha.equals(expectedSha, ignoreCase = true)) {
+                "SHA-256 mismatch for ${target.name}. Expected: $expectedSha, Found: $actualSha"
+            }
 
-        if (!temp.renameTo(target)) {
-            temp.copyTo(
-                target,
-                overwrite = true
-            )
-            temp.delete()
+            if (target.exists()) {
+                target.delete()
+            }
+
+            if (!temp.renameTo(target)) {
+                temp.copyTo(target, overwrite = true)
+                temp.delete()
+            }
+        } catch (e: Exception) {
+            if (temp.exists()) {
+                temp.delete()
+            }
+            throw e
         }
     }
 
@@ -119,52 +127,32 @@ class ModelManager(
         file: File,
         expectedSha: String
     ): Boolean {
-        if (!file.exists()) {
-            return false
-        }
-
-        if (file.length() <= 0L) {
+        if (!file.exists() || file.length() <= 0L) {
             return false
         }
 
         return try {
-            sha256(file).equals(
-                expectedSha,
-                ignoreCase = true
-            )
+            sha256(file).equals(expectedSha, ignoreCase = true)
         } catch (_: Exception) {
             false
         }
     }
 
-    private fun sha256(
-        file: File
-    ): String {
-        val digest =
-            MessageDigest.getInstance("SHA-256")
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
 
         file.inputStream().use { input ->
-            val buffer = ByteArray(1024 * 1024)
-
-            while (true) {
-                val count = input.read(buffer)
-
-                if (count < 0) {
-                    break
-                }
-
+            val buffer = ByteArray(BUFFER_SIZE)
+            var count: Int
+            while (input.read(buffer).also { count = it } >= 0) {
                 if (count > 0) {
-                    digest.update(
-                        buffer,
-                        0,
-                        count
-                    )
+                    digest.update(buffer, 0, count)
                 }
             }
         }
 
-        return digest.digest().joinToString("") {
-            "%02x".format(it)
+        return digest.digest().joinToString("") { byte ->
+            "%02x".format(byte)
         }
     }
 }
