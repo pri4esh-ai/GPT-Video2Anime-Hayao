@@ -5,6 +5,7 @@ import java.nio.ByteBuffer
 
 object NativeYuvUtils {
     init {
+        // This now perfectly matches the CMakeLists.txt library name
         System.loadLibrary("gptvideo2anime")
     }
 
