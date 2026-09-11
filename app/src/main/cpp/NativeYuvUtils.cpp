@@ -1,3 +1,5 @@
+#include <jni.h>
+#include <android/bitmap.h>
 #include <cstdint>
 #include <algorithm>
 
@@ -8,7 +10,7 @@ inline uint8_t clamp(int val) {
 }
 
 /**
- * Fast hardware-friendly YUV_420_888 to RGBA buffer conversion.
+ * Robust stride-aware YUV_420_888 to RGBA buffer conversion.
  */
 void convertYUV420ToRGBA(
     const uint8_t* yPlane,
@@ -47,3 +49,49 @@ void convertYUV420ToRGBA(
 }
 
 } // namespace NativeYuvUtils
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_gptvideo2anime_util_NativeYuvUtils_convertYuvToBitmapNative(
+        JNIEnv *env,
+        jobject,
+        jobject yBuffer,
+        jobject uBuffer,
+        jobject vBuffer,
+        jint width,
+        jint height,
+        jint yRowStride,
+        jint uvRowStride,
+        jint uvPixelStride,
+        jobject bitmap) {
+
+    const uint8_t *yPtr = static_cast<const uint8_t *>(env->GetDirectBufferAddress(yBuffer));
+    const uint8_t *uPtr = static_cast<const uint8_t *>(env->GetDirectBufferAddress(uBuffer));
+    const uint8_t *vPtr = static_cast<const uint8_t *>(env->GetDirectBufferAddress(vBuffer));
+
+    if (!yPtr || !uPtr || !vPtr) {
+        return;
+    }
+
+    AndroidBitmapInfo info;
+    void *pixels = nullptr;
+
+    if (AndroidBitmap_getInfo(env, bitmap, &info) < 0 ||
+        AndroidBitmap_lockPixels(env, bitmap, &pixels) < 0) {
+        return;
+    }
+
+    NativeYuvUtils::convertYUV420ToRGBA(
+        yPtr,
+        uPtr,
+        vPtr,
+        width,
+        height,
+        yRowStride,
+        uvRowStride,
+        uvPixelStride,
+        static_cast<uint8_t *>(pixels)
+    );
+
+    AndroidBitmap_unlockPixels(env, bitmap);
+}
