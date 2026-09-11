@@ -6,7 +6,6 @@
 #define LOG_TAG "NativeBridge"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// Forward declaration of the utility function
 namespace NativeYuvUtils {
     void convertYUV420ToRGBA(
         const uint8_t* yPlane,
@@ -18,11 +17,39 @@ namespace NativeYuvUtils {
         int uvRowStride,
         int uvPixelStride,
         uint8_t* outRgba
-    );
+    ) {
+        uint32_t* outPixels = reinterpret_cast<uint32_t*>(outRgba);
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int yIndex = y * yRowStride + x;
+                int Y = yPlane[yIndex];
+
+                int uvIndex = (y / 2) * uvRowStride + (x / 2) * uvPixelStride;
+                int U = uPlane[uvIndex];
+                int V = vPlane[uvIndex];
+
+                int C = Y - 16;
+                int D = U - 128;
+                int E = V - 128;
+
+                int R = (298 * C + 409 * E + 128) >> 8;
+                int G = (298 * C - 100 * D - 208 * E + 128) >> 8;
+                int B = (298 * C + 516 * D + 128) >> 8;
+
+                R = R < 0 ? 0 : (R > 255 ? 255 : R);
+                G = G < 0 ? 0 : (G > 255 ? 255 : G);
+                B = B < 0 ? 0 : (B > 255 ? 255 : B);
+
+                outPixels[y * width + x] = (255u << 24) | (static_cast<uint32_t>(R) << 16) | (static_cast<uint32_t>(G) << 8) | static_cast<uint32_t>(B);
+            }
+        }
+    }
 }
 
+// FIXED: Matches com.gptvideo2anime.pipeline.YuvConverter exactly
 extern "C" JNIEXPORT void JNICALL
-Java_com_gptvideo2anime_util_NativeYuvUtils_convertYuvToBitmapNative(
+Java_com_gptvideo2anime_pipeline_YuvConverter_convertYuvToBitmapNative(
     JNIEnv* env,
     jclass clazz,
     jobject yBuffer,
