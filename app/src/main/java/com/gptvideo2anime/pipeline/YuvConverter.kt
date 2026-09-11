@@ -1,104 +1,98 @@
-package com.gptvideo2anime.pipeline
+#include <jni.h>
+#include <android/bitmap.h>
+#include <arm_neon.h>
+#include <cstdint>
 
-import android.graphics.Bitmap
-import android.graphics.Color
-import android.media.Image
-import java.io.ByteArrayOutputStream
-import kotlin.math.min
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_gptvideo2anime_util_NativeYuvUtils_nv12ToBitmapNative(
+        JNIEnv *env,
+        jobject,
+        jbyteArray yuvArray,
+        jint width,
+        jint height,
+        jobject bitmap) {
 
-object YuvConverter {
+    jbyte* yuv = env->GetByteArrayElements(yuvArray, nullptr);
 
-    fun imageToBitmap(image: Image): Bitmap {
-        require(image.format == android.graphics.ImageFormat.YUV_420_888) {
-            "Unsupported image format: ${image.format}"
-        }
+    AndroidBitmapInfo info;
+    void* pixels = nullptr;
 
-        val width = image.width
-        val height = image.height
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val pixels = IntArray(width * height)
+    if (AndroidBitmap_getInfo(env, bitmap, &info) < 0 ||
+        AndroidBitmap_lockPixels(env, bitmap, &pixels) < 0) {
 
-        val yPlane = image.planes[0]
-        val uPlane = image.planes[1]
-        val vPlane = image.planes[2]
-
-        val yBuffer = yPlane.buffer
-        val uBuffer = uPlane.buffer
-        val vBuffer = vPlane.buffer
-
-        val yRowStride = yPlane.rowStride
-        val uRowStride = uPlane.rowStride
-        val vRowStride = vPlane.rowStride
-
-        val uPixelStride = uPlane.pixelStride
-        val vPixelStride = vPlane.pixelStride
-
-        var pixelIdx = 0
-        for (y in 0 until height) {
-            val yRowStart = y * yRowStride
-            val uvRowStart = (y shr 1) * uRowStride
-            val vRowStart = (y shr 1) * vRowStride
-
-            for (x in 0 until width) {
-                val yVal = yBuffer.get(yRowStart + x).toInt() and 0xFF
-                val uvX = x shr 1
-                val uVal = uBuffer.get(uvRowStart + uvX * uPixelStride).toInt() and 0xFF
-                val vVal = vBuffer.get(vRowStart + uvX * vPixelStride).toInt() and 0xFF
-
-                val c = yVal - 16
-                val d = uVal - 128
-                val e = vVal - 128
-
-                val r = (298 * c + 409 * e + 128) shr 8
-                val g = (298 * c - 100 * d - 208 * e + 128) shr 8
-                val b = (298 * c + 516 * d + 128) shr 8
-
-                pixels[pixelIdx++] = Color.rgb(
-                    r.coerceIn(0, 255),
-                    g.coerceIn(0, 255),
-                    b.coerceIn(0, 255)
-                )
-            }
-        }
-
-        bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-        return bitmap
+        env->ReleaseByteArrayElements(yuvArray, yuv, JNI_ABORT);
+        return;
     }
 
-    /**
-     * Converts Bitmap to NV12 formatted YUV420 byte array.
-     */
-    fun bitmapToNv12(bitmap: Bitmap): ByteArray {
-        val width = (bitmap.width / 2) * 2
-        val height = (bitmap.height / 2) * 2
-        val frameSize = width * height
-        val output = ByteArray(frameSize + frameSize / 2)
+    const uint8_t* yPlane = reinterpret_cast<uint8_t*>(yuv);
+    const uint8_t* uvPlane = yPlane + width * height;
+    uint32_t* dst = static_cast<uint32_t*>(pixels);
 
-        val pixels = IntArray(width * height)
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+    for (int y = 0; y < height; y++) {
 
-        var yIndex = 0
-        var uvIndex = frameSize
+        int yRow = y * width;
+        int uvRow = (y >> 1) * width;
 
-        for (j in 0 until height) {
-            for (i in 0 until width) {
-                val color = pixels[j * width + i]
-                val r = (color shr 16) and 0xFF
-                val g = (color shr 8) and 0xFF
-                val b = color and 0xFF
+        for (int x = 0; x < width; x += 8) {
 
-                val y = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
-                output[yIndex++] = y.coerceIn(16, 235).toByte()
+            uint8x8_t y8 = vld1_u8(yPlane + yRow + x);
 
-                if (j % 2 == 0 && i % 2 == 0) {
-                    val u = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
-                    val v = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
+            uint8x8_t uv8 =
+                vld1_u8(uvPlane + uvRow + (x & ~1));
 
-                    output[uvIndex++] = u.coerceIn(16, 240).toByte()
-                    output[uvIndex++] = v.coerceIn(16, 240).toByte()
-                }
+            uint8x8_t u =
+                vzip_u8(uv8, uv8).val[0];
+
+            uint8x8_t v =
+                vzip_u8(uv8, uv8).val[1];
+
+            int16x8_t Y =
+                vreinterpretq_s16_u16(
+                    vsubl_u8(y8, vdup_n_u8(16)));
+
+            int16x8_t U =
+                vreinterpretq_s16_u16(
+                    vsubl_u8(u, vdup_n_u8(128)));
+
+            int16x8_t V =
+                vreinterpretq_s16_u16(
+                    vsubl_u8(v, vdup_n_u8(128)));
+
+            Y = vshrq_n_s16(vmulq_n_s16(Y, 298), 8);
+
+            int16x8_t R =
+                vaddq_s16(
+                    Y,
+                    vshrq_n_s16(vmulq_n_s16(V, 409), 8));
+
+            int16x8_t G =
+                vsubq_s16(
+                    vsubq_s16(
+                        Y,
+                        vshrq_n_s16(vmulq_n_s16(U, 100), 8)),
+                    vshrq_n_s16(vmulq_n_s16(V, 208), 8));
+
+            int16x8_t B =
+                vaddq_s16(
+                    Y,
+                    vshrq_n_s16(vmulq_n_s16(U, 516), 8));
+
+            uint8x8_t r = vqmovun_s16(R);
+            uint8x8_t g = vqmovun_s16(G);
+            uint8x8_t b = vqmovun_s16(B);
+
+            for (int i = 0; i < 8; i++) {
+
+                dst[yRow + x + i] =
+                        0xFF000000 |
+                        (vget_lane_u8(r, i) << 16) |
+                        (vget_lane_u8(g, i) << 8) |
+                        vget_lane_u8(b, i);
             }
         }
-        return output
     }
+
+    AndroidBitmap_unlockPixels(env, bitmap);
+    env->ReleaseByteArrayElements(yuvArray, yuv, JNI_ABORT);
 }
