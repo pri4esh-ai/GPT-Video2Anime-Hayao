@@ -32,11 +32,56 @@ class MediaCodecVideoEngine : AutoCloseable {
     private var frameHeight = 0
     private var durationUs = 0L
 
+    private var isInputEof = false
+    private var isOutputEof = false
+
+    fun getWidth(): Int = frameWidth
+    fun getHeight(): Int = frameHeight
+    fun getDurationUs(): Long = durationUs
+
     /**
-     * Prepares the hardware decoder for frame extraction from a local video file.
+     * Setup decoder outputting directly to an existing Surface instance.
+     */
+    fun setup(videoFile: File, surface: Surface) {
+        initInternal(videoFile, surface)
+    }
+
+    /**
+     * Prepares the hardware decoder tied to a GL Texture ID via SurfaceTexture.
      */
     fun setup(videoFile: File, outputTextureId: Int) {
         require(videoFile.exists()) { "Input file does not exist: ${videoFile.absolutePath}" }
+
+        // 1. Initialize Extractor to determine video resolution
+        val tempExtractor = MediaExtractor().apply {
+            setDataSource(videoFile.absolutePath)
+        }
+        val trackIdx = selectVideoTrack(tempExtractor)
+        if (trackIdx < 0) {
+            tempExtractor.release()
+            throw IllegalStateException("No valid video track found in ${videoFile.name}")
+        }
+        val format = tempExtractor.getTrackFormat(trackIdx)
+        val width = format.getInteger(MediaFormat.KEY_WIDTH)
+        val height = format.getInteger(MediaFormat.KEY_HEIGHT)
+        tempExtractor.release()
+
+        // 2. Bind SurfaceTexture to GL Texture ID
+        val st = SurfaceTexture(outputTextureId).apply {
+            setDefaultBufferSize(width, height)
+        }
+        this.surfaceTexture = st
+        val s = Surface(st)
+        this.outputSurface = s
+
+        initInternal(videoFile, s)
+    }
+
+    private fun initInternal(videoFile: File, surface: Surface) {
+        require(videoFile.exists()) { "Input file does not exist: ${videoFile.absolutePath}" }
+
+        isInputEof = false
+        isOutputEof = false
 
         // 1. Initialize Extractor
         extractor = MediaExtractor().apply {
@@ -51,7 +96,7 @@ class MediaCodecVideoEngine : AutoCloseable {
         extractor!!.selectTrack(videoTrackIndex)
 
         val format = extractor!!.getTrackFormat(videoTrackIndex)
-        val mime = format.getString(MediaFormat.KEY_MIME) 
+        val mime = format.getString(MediaFormat.KEY_MIME)
             ?: throw IllegalStateException("Missing MIME type for track $videoTrackIndex")
 
         frameWidth = format.getInteger(MediaFormat.KEY_WIDTH)
@@ -64,15 +109,9 @@ class MediaCodecVideoEngine : AutoCloseable {
 
         Log.i(TAG, "Selected decoder: ${decoderInfo.name} for MIME: $mime (${frameWidth}x${frameHeight})")
 
-        // 4. Create Output Surface tied to GL Texture ID
-        surfaceTexture = SurfaceTexture(outputTextureId).apply {
-            setDefaultBufferSize(frameWidth, frameHeight)
-        }
-        outputSurface = Surface(surfaceTexture)
-
-        // 5. Initialize and Configure Decoder
+        // 4. Initialize and Configure Decoder
         decoder = MediaCodec.createByCodecName(decoderInfo.name).apply {
-            configure(format, outputSurface, null, 0)
+            configure(format, surface, null, 0)
             start()
         }
     }
@@ -85,13 +124,13 @@ class MediaCodecVideoEngine : AutoCloseable {
         val codec = decoder ?: throw IllegalStateException("Engine not initialized. Call setup() first.")
         val extract = extractor ?: throw IllegalStateException("Engine not initialized.")
 
-        val bufferInfo = MediaCodec.BufferInfo()
-        var inputEof = false
-        var outputEof = false
+        if (isOutputEof) return false
 
-        while (!outputEof) {
+        val bufferInfo = MediaCodec.BufferInfo()
+
+        while (!isOutputEof) {
             // Feed input data into hardware decoder
-            if (!inputEof) {
+            if (!isInputEof) {
                 val inputBufferIndex = codec.dequeueInputBuffer(TIMEOUT_USEC)
                 if (inputBufferIndex >= 0) {
                     val inputBuffer: ByteBuffer? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LPOINTER) {
@@ -111,7 +150,7 @@ class MediaCodecVideoEngine : AutoCloseable {
                             0L,
                             MediaCodec.BUFFER_FLAG_END_OF_STREAM
                         )
-                        inputEof = true
+                        isInputEof = true
                     } else {
                         val presentationTimeUs = extract.sampleTime
                         codec.queueInputBuffer(
@@ -130,26 +169,21 @@ class MediaCodecVideoEngine : AutoCloseable {
             val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_USEC)
             when {
                 outputBufferIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                    // Decoder needs more input or time
-                    if (inputEof) break 
+                    if (isInputEof) break
                 }
                 outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                    val newFormat = codec.outputFormat
-                    Log.d(TAG, "Decoder output format changed: $newFormat")
+                    Log.d(TAG, "Decoder output format changed: ${codec.outputFormat}")
                 }
                 outputBufferIndex >= 0 -> {
-                    val isEof = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                    if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        isOutputEof = true
+                    }
 
-                    // Release buffer to surface (render = true)
                     val renderFrame = bufferInfo.size > 0
                     codec.releaseOutputBuffer(outputBufferIndex, renderFrame)
 
                     if (renderFrame) {
                         return true // Successfully pushed frame to Surface
-                    }
-
-                    if (isEof) {
-                        outputEof = true
                     }
                 }
             }
