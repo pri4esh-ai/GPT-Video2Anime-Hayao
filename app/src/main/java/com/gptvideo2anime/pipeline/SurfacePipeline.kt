@@ -11,6 +11,10 @@ import com.gptvideo2anime.inference.OnnxAnimeEngine
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 
+/**
+ * Manages the EGL/Surface hardware rendering pipeline, capturing YUV frames from MediaCodec,
+ * converting them to Bitmaps, and running ONNX style-transfer inference.
+ */
 class SurfacePipeline(
     private val outputWidth: Int,
     private val outputHeight: Int,
@@ -48,35 +52,35 @@ class SurfacePipeline(
         imageReader.setOnImageAvailableListener({ reader ->
             val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
             if (!imageQueue.offer(image)) {
+                // Queue is full, drop oldest or current frame to prevent backlog
                 image.close()
             }
         }, handler)
     }
 
+    /**
+     * Polls the next decoded frame, converts it, runs Hayao style transfer,
+     * and returns the resulting anime Bitmap scaled to output dimensions.
+     */
     fun processNextFrame(): Bitmap? {
         val image = imageQueue.poll(100, TimeUnit.MILLISECONDS) ?: return null
 
         return try {
             val bitmap = YuvConverter.imageToBitmap(image)
+            
+            // Run ONNX inference
+            val processedBitmap = animeEngine.processFrame(bitmap)
 
-            val resized = if (bitmap.width == MODEL_SIZE && bitmap.height == MODEL_SIZE) {
-                bitmap
+            // Ensure output matches requested video stream dimensions
+            if (processedBitmap.width == outputWidth && processedBitmap.height == outputHeight) {
+                processedBitmap
             } else {
-                Bitmap.createScaledBitmap(bitmap, MODEL_SIZE, MODEL_SIZE, true)
-            }
-
-            val processedFrame: Bitmap? = try {
-                animeEngine.processFrame(resized)
-            } finally {
-                if (resized !== bitmap && !resized.isRecycled) {
-                    resized.recycle()
+                val scaled = Bitmap.createScaledBitmap(processedBitmap, outputWidth, outputHeight, true)
+                if (scaled !== processedBitmap && !processedBitmap.isRecycled) {
+                    processedBitmap.recycle()
                 }
-                if (!bitmap.isRecycled) {
-                    bitmap.recycle()
-                }
+                scaled
             }
-
-            processedFrame
         } catch (e: Exception) {
             null
         } finally {
