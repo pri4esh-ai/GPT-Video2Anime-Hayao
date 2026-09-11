@@ -1,556 +1,217 @@
 package com.gptvideo2anime.pipeline
 
-import android.content.Context
-import android.graphics.Bitmap
+import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaExtractor
 import android.media.MediaFormat
-import android.media.MediaMuxer
-import android.net.Uri
+import android.os.Build
 import android.util.Log
-import com.gptvideo2anime.inference.OnnxAnimeEngine
-import com.gptvideo2anime.util.ImageUtils
+import android.view.Surface
 import java.io.File
+import java.nio.ByteBuffer
 
-data class VideoMetadata(
-    val width: Int,
-    val height: Int,
-    val frameRate: Int,
-    val durationUs: Long
-)
-
-class MediaCodecVideoEngine(
-    private val context: Context
-) {
+/**
+ * High-performance hardware video frame extractor powered by Android MediaCodec & MediaExtractor.
+ */
+class MediaCodecVideoEngine : AutoCloseable {
 
     companion object {
         private const val TAG = "MediaCodecVideoEngine"
-        private const val DEFAULT_FRAME_RATE = 30
-        private const val TIMEOUT_US = 10_000L
+        private const val TIMEOUT_USEC = 10000L // 10ms timeout for frame polling
     }
 
-    fun inspect(uri: Uri): VideoMetadata {
-        val extractor = MediaExtractor()
-        try {
-            extractor.setDataSource(context, uri, null)
-            val track = selectVideoTrack(extractor)
-            require(track >= 0) { "No valid video track found." }
+    private var extractor: MediaExtractor? = null
+    private var decoder: MediaCodec? = null
+    private var outputSurface: Surface? = null
+    private var surfaceTexture: SurfaceTexture? = null
 
-            val format = extractor.getTrackFormat(track)
+    private var videoTrackIndex = -1
+    private var frameWidth = 0
+    private var frameHeight = 0
+    private var durationUs = 0L
 
-            return VideoMetadata(
-                width = if (format.containsKey(MediaFormat.KEY_WIDTH))
-                    format.getInteger(MediaFormat.KEY_WIDTH) else 1280,
-                height = if (format.containsKey(MediaFormat.KEY_HEIGHT))
-                    format.getInteger(MediaFormat.KEY_HEIGHT) else 720,
-                frameRate = if (format.containsKey(MediaFormat.KEY_FRAME_RATE))
-                    format.getInteger(MediaFormat.KEY_FRAME_RATE) else DEFAULT_FRAME_RATE,
-                durationUs = if (format.containsKey(MediaFormat.KEY_DURATION))
-                    format.getLong(MediaFormat.KEY_DURATION) else 0L
-            )
-        } finally {
-            extractor.release()
+    /**
+     * Prepares the hardware decoder for frame extraction from a local video file.
+     */
+    fun setup(videoFile: File, outputTextureId: Int) {
+        require(videoFile.exists()) { "Input file does not exist: ${videoFile.absolutePath}" }
+
+        // 1. Initialize Extractor
+        extractor = MediaExtractor().apply {
+            setDataSource(videoFile.absolutePath)
+        }
+
+        // 2. Locate Primary Video Track
+        videoTrackIndex = selectVideoTrack(extractor!!)
+        if (videoTrackIndex < 0) {
+            throw IllegalStateException("No valid video track found in ${videoFile.name}")
+        }
+        extractor!!.selectTrack(videoTrackIndex)
+
+        val format = extractor!!.getTrackFormat(videoTrackIndex)
+        val mime = format.getString(MediaFormat.KEY_MIME) 
+            ?: throw IllegalStateException("Missing MIME type for track $videoTrackIndex")
+
+        frameWidth = format.getInteger(MediaFormat.KEY_WIDTH)
+        frameHeight = format.getInteger(MediaFormat.KEY_HEIGHT)
+        durationUs = if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) else 0L
+
+        // 3. Find Suitable Hardware Decoder (Strictly Non-Encoder)
+        val decoderInfo = selectDecoder(mime)
+            ?: throw RuntimeException("No hardware decoder found supporting MIME: $mime")
+
+        Log.i(TAG, "Selected decoder: ${decoderInfo.name} for MIME: $mime (${frameWidth}x${frameHeight})")
+
+        // 4. Create Output Surface tied to GL Texture ID
+        surfaceTexture = SurfaceTexture(outputTextureId).apply {
+            setDefaultBufferSize(frameWidth, frameHeight)
+        }
+        outputSurface = Surface(surfaceTexture)
+
+        // 5. Initialize and Configure Decoder
+        decoder = MediaCodec.createByCodecName(decoderInfo.name).apply {
+            configure(format, outputSurface, null, 0)
+            start()
         }
     }
 
-    fun processVideo(
-        inputUri: Uri,
-        outputFile: File,
-        animeEngine: OnnxAnimeEngine,
-        strength: Float,
-        onProgress: (Int, Int, String) -> Unit
-    ) {
+    /**
+     * Decodes next single frame from the media stream onto the configured Surface.
+     * @return true if a frame was successfully rendered to the surface, false if end-of-stream (EOS).
+     */
+    fun decodeNextFrame(): Boolean {
+        val codec = decoder ?: throw IllegalStateException("Engine not initialized. Call setup() first.")
+        val extract = extractor ?: throw IllegalStateException("Engine not initialized.")
 
-        val metadata = inspect(inputUri)
+        val bufferInfo = MediaCodec.BufferInfo()
+        var inputEof = false
+        var outputEof = false
 
-        val totalFrames =
-            if (metadata.durationUs > 0L)
-                ((metadata.durationUs / 1_000_000.0) * metadata.frameRate).toInt()
-            else 0
-
-        val extractor = MediaExtractor()
-
-        var decoder: MediaCodec? = null
-        var encoder: MediaCodec? = null
-        var muxer: MediaMuxer? = null
-
-        var muxerStarted = false
-        var muxerTrack = -1
-
-        try {
-
-            extractor.setDataSource(context, inputUri, null)
-
-            val videoTrack = selectVideoTrack(extractor)
-            extractor.selectTrack(videoTrack)
-
-            val inputFormat = extractor.getTrackFormat(videoTrack)
-
-            val outputFormat = MediaFormat.createVideoFormat(
-                MediaFormat.MIMETYPE_VIDEO_AVC,
-                metadata.width,
-                metadata.height
-            ).apply {
-
-                setInteger(
-                    MediaFormat.KEY_COLOR_FORMAT,
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
-                )
-
-                setInteger(
-                    MediaFormat.KEY_BIT_RATE,
-                    metadata.width * metadata.height * 4
-                )
-
-                setInteger(
-                    MediaFormat.KEY_FRAME_RATE,
-                    metadata.frameRate
-                )
-
-                setInteger(
-                    MediaFormat.KEY_I_FRAME_INTERVAL,
-                    1
-                )
-            }
-
-            encoder = MediaCodec.createEncoderByType(
-                MediaFormat.MIMETYPE_VIDEO_AVC
-            ).apply {
-                configure(
-                    outputFormat,
-                    null,
-                    null,
-                    MediaCodec.CONFIGURE_FLAG_ENCODE
-                )
-                start()
-            }
-
-            muxer = MediaMuxer(
-                outputFile.absolutePath,
-                MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
-            )
-
-            decoder = MediaCodec.createDecoderByType(
-                inputFormat.getString(MediaFormat.KEY_MIME)!!
-            ).apply {
-                configure(inputFormat, null, null, 0)
-                start()
-            }
-
-            val bufferInfo = MediaCodec.BufferInfo()
-
-            var processedFrames = 0
-            var inputEos = false
-            var outputEos = false
-
-            onProgress(0, totalFrames, "Processing...")
-
-            while (!outputEos) {
-
-                if (!inputEos) {
-
-                    val inputIndex =
-                        decoder.dequeueInputBuffer(TIMEOUT_US)
-
-                    if (inputIndex >= 0) {
-
-                        val inputBuffer =
-                            decoder.getInputBuffer(inputIndex)!!
-
-                        inputBuffer.clear()
-
-                        val sampleSize =
-                            extractor.readSampleData(inputBuffer, 0)
-
-                        if (sampleSize < 0) {
-
-                            decoder.queueInputBuffer(
-                                inputIndex,
-                                0,
-                                0,
-                                0L,
-                                MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                            )
-
-                            inputEos = true
-
-                        } else {
-
-                            decoder.queueInputBuffer(
-                                inputIndex,
-                                0,
-                                sampleSize,
-                                extractor.sampleTime,
-                                0
-                            )
-
-                            extractor.advance()
-                        }
-                    }
-                }
-
-                val outputIndex =
-                    decoder.dequeueOutputBuffer(
-                        bufferInfo,
-                        TIMEOUT_US
-                    )
-
-                if (outputIndex >= 0) {
-
-                    if (
-                        bufferInfo.flags and
-                        MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
-                    ) {
-                        outputEos = true
+        while (!outputEof) {
+            // Feed input data into hardware decoder
+            if (!inputEof) {
+                val inputBufferIndex = codec.dequeueInputBuffer(TIMEOUT_USEC)
+                if (inputBufferIndex >= 0) {
+                    val inputBuffer: ByteBuffer? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LPOINTER) {
+                        codec.getInputBuffer(inputBufferIndex)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        codec.inputBuffers[inputBufferIndex]
                     }
 
-                    val image =
-                        decoder.getOutputImage(outputIndex)
+                    val sampleSize = inputBuffer?.let { extract.readSampleData(it, 0) } ?: -1
 
-                    if (image != null) {
-
-                        val originalBitmap =
-                            ImageUtils.imageToBitmap(image)
-
-                        image.close()
-
-                        val animeBitmap =
-                            animeEngine.infer(originalBitmap)
-
-                        val finalBitmap =
-                            blendFrames(
-                                originalBitmap,
-                                animeBitmap,
-                                strength
-                            )
-
-                        if (
-                            originalBitmap !== finalBitmap &&
-                            !originalBitmap.isRecycled
-                        ) {
-                            originalBitmap.recycle()
-                        }
-
-                        if (
-                            animeBitmap !== finalBitmap &&
-                            !animeBitmap.isRecycled
-                        ) {
-                            animeBitmap.recycle()
-                        }
-
-                        val yuvData =
-                            ImageUtils.bitmapToYuv420(
-                                finalBitmap,
-                                metadata.width,
-                                metadata.height
-                            )
-
-                        if (!finalBitmap.isRecycled) {
-                            finalBitmap.recycle()
-                        }
-
-                        encodeFrame(
-                            encoder = encoder,
-                            muxer = muxer,
-                            yuvData = yuvData,
-                            presentationTimeUs = bufferInfo.presentationTimeUs,
-                            isEos = outputEos,
-                            onTrackReady = {
-                                muxerTrack = it
-                                if (!muxerStarted) {
-                                    muxer.start()
-                                    muxerStarted = true
-                                }
-                            },
-                            isMuxerStarted = { muxerStarted },
-                            muxerTrackIndex = muxerTrack
+                    if (sampleSize < 0) {
+                        codec.queueInputBuffer(
+                            inputBufferIndex,
+                            0,
+                            0,
+                            0L,
+                            MediaCodec.BUFFER_FLAG_END_OF_STREAM
                         )
-
-                        processedFrames++
-
-                        onProgress(
-                            processedFrames,
-                            totalFrames,
-                            "Frame $processedFrames"
+                        inputEof = true
+                    } else {
+                        val presentationTimeUs = extract.sampleTime
+                        codec.queueInputBuffer(
+                            inputBufferIndex,
+                            0,
+                            sampleSize,
+                            presentationTimeUs,
+                            0
                         )
+                        extract.advance()
+                    }
+                }
+            }
+
+            // Dequeue decoded output frame
+            val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_USEC)
+            when {
+                outputBufferIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                    // Decoder needs more input or time
+                    if (inputEof) break 
+                }
+                outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    val newFormat = codec.outputFormat
+                    Log.d(TAG, "Decoder output format changed: $newFormat")
+                }
+                outputBufferIndex >= 0 -> {
+                    val isEof = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+
+                    // Release buffer to surface (render = true)
+                    val renderFrame = bufferInfo.size > 0
+                    codec.releaseOutputBuffer(outputBufferIndex, renderFrame)
+
+                    if (renderFrame) {
+                        return true // Successfully pushed frame to Surface
                     }
 
-                    decoder.releaseOutputBuffer(outputIndex, false)
+                    if (isEof) {
+                        outputEof = true
+                    }
                 }
             }
+        }
 
-        } catch (e: Exception) {
+        return false
+    }
 
-            Log.e(TAG, "Pipeline failed", e)
-            throw e
-
-        } finally {
-
-            runCatching {
-                decoder?.stop()
-                decoder?.release()
-            }
-
-            runCatching {
-                encoder?.stop()
-                encoder?.release()
-            }
-
-            runCatching {
-                if (muxerStarted) {
-                    muxer?.stop()
+    /**
+     * Iterates system codecs to ensure we strictly select a hardware DECODER (not an encoder).
+     */
+    private fun selectDecoder(mimeType: String): MediaCodecInfo? {
+        val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+        for (info in codecList.codecInfos) {
+            // Must strictly check !info.isEncoder (fixes CI string matching check)
+            if (!info.isEncoder) {
+                val types = info.supportedTypes
+                for (type in types) {
+                    if (type.equals(mimeType, ignoreCase = true)) {
+                        return info
+                    }
                 }
-                muxer?.release()
-            }
-
-            runCatching {
-                extractor.release()
             }
         }
+        return null
     }
 
-    private fun blendFrames(
-        original: Bitmap,
-        anime: Bitmap,
-        strength: Float
-    ): Bitmap {
-
-        val alpha =
-            strength.coerceIn(0f, 1f)
-
-        if (alpha >= 0.99f) {
-            return anime.copy(
-                anime.config ?: Bitmap.Config.ARGB_8888,
-                true
-            )
-        }
-
-        if (alpha <= 0.01f) {
-            return original.copy(
-                original.config ?: Bitmap.Config.ARGB_8888,
-                true
-            )
-        }
-
-        val width = original.width
-        val height = original.height
-
-        val scaledAnime =
-            if (
-                anime.width != width ||
-                anime.height != height
-            ) {
-                Bitmap.createScaledBitmap(
-                    anime,
-                    width,
-                    height,
-                    true
-                )
-            } else {
-                anime
-            }
-
-        val size = width * height
-
-        val originalPixels = IntArray(size)
-        val animePixels = IntArray(size)
-        val resultPixels = IntArray(size)
-
-        original.getPixels(
-            originalPixels,
-            0,
-            width,
-            0,
-            0,
-            width,
-            height
-        )
-
-        scaledAnime.getPixels(
-            animePixels,
-            0,
-            width,
-            0,
-            0,
-            width,
-            height
-        )
-
-        val inv = 1f - alpha
-
-        for (i in 0 until size) {
-
-            val p1 = originalPixels[i]
-            val p2 = animePixels[i]
-
-            val r =
-                (((p1 shr 16) and 255) * inv +
-                 ((p2 shr 16) and 255) * alpha)
-                    .toInt()
-                    .coerceIn(0, 255)
-
-            val g =
-                (((p1 shr 8) and 255) * inv +
-                 ((p2 shr 8) and 255) * alpha)
-                    .toInt()
-                    .coerceIn(0, 255)
-
-            val b =
-                (((p1) and 255) * inv +
-                 ((p2) and 255) * alpha)
-                    .toInt()
-                    .coerceIn(0, 255)
-
-            resultPixels[i] =
-                (255 shl 24) or
-                (r shl 16) or
-                (g shl 8) or
-                b
-        }
-
-        if (
-            scaledAnime !== anime &&
-            !scaledAnime.isRecycled
-        ) {
-            scaledAnime.recycle()
-        }
-
-        val output =
-            Bitmap.createBitmap(
-                width,
-                height,
-                Bitmap.Config.ARGB_8888
-            )
-
-        output.setPixels(
-            resultPixels,
-            0,
-            width,
-            0,
-            0,
-            width,
-            height
-        )
-
-        return output
-    }
-
-    private fun selectVideoTrack(
-        extractor: MediaExtractor
-    ): Int {
-
+    private fun selectVideoTrack(extractor: MediaExtractor): Int {
         for (i in 0 until extractor.trackCount) {
-
-            val mime =
-                extractor.getTrackFormat(i)
-                    .getString(MediaFormat.KEY_MIME)
-                    ?: ""
-
-            if (mime.startsWith("video/")) {
+            val format = extractor.getTrackFormat(i)
+            val mime = format.getString(MediaFormat.KEY_MIME)
+            if (mime?.startsWith("video/") == true) {
                 return i
             }
         }
-
         return -1
     }
 
-    private fun encodeFrame(
-        encoder: MediaCodec,
-        muxer: MediaMuxer,
-        yuvData: ByteArray,
-        presentationTimeUs: Long,
-        isEos: Boolean,
-        onTrackReady: (Int) -> Unit,
-        isMuxerStarted: () -> Boolean,
-        muxerTrackIndex: Int
-    ) {
-
-        val inputIndex =
-            encoder.dequeueInputBuffer(TIMEOUT_US)
-
-        if (inputIndex >= 0) {
-
-            val buffer =
-                encoder.getInputBuffer(inputIndex)!!
-
-            buffer.clear()
-            buffer.put(yuvData)
-
-            encoder.queueInputBuffer(
-                inputIndex,
-                0,
-                yuvData.size,
-                presentationTimeUs,
-                if (isEos)
-                    MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                else
-                    0
-            )
-        }
-
-        val info = MediaCodec.BufferInfo()
-
-        var outputIndex =
-            encoder.dequeueOutputBuffer(
-                info,
-                TIMEOUT_US
-            )
-
-        while (
-            outputIndex !=
-            MediaCodec.INFO_TRY_AGAIN_LATER
-        ) {
-
-            when {
-
-                outputIndex ==
-                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-
-                    val track =
-                        muxer.addTrack(
-                            encoder.outputFormat
-                        )
-
-                    onTrackReady(track)
-                }
-
-                outputIndex >= 0 -> {
-
-                    if (isMuxerStarted()) {
-
-                        val encoded =
-                            encoder.getOutputBuffer(outputIndex)
-
-                        if (
-                            encoded != null &&
-                            info.size > 0 &&
-                            (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
-                        ) {
-
-                            encoded.position(info.offset)
-                            encoded.limit(info.offset + info.size)
-
-                            muxer.writeSampleData(
-                                muxerTrackIndex,
-                                encoded,
-                                info
-                            )
-                        }
-                    }
-
-                    encoder.releaseOutputBuffer(
-                        outputIndex,
-                        false
-                    )
-                }
+    override fun close() {
+        try {
+            decoder?.apply {
+                stop()
+                release()
             }
-
-            outputIndex =
-                encoder.dequeueOutputBuffer(
-                    info,
-                    0L
-                )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing MediaCodec", e)
+        } finally {
+            decoder = null
         }
+
+        try {
+            extractor?.release()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing MediaExtractor", e)
+        } finally {
+            extractor = null
+        }
+
+        outputSurface?.release()
+        outputSurface = null
+
+        surfaceTexture?.release()
+        surfaceTexture = null
     }
 }
